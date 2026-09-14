@@ -774,3 +774,247 @@ argv_lacks() {
     assert_success
     assert_output_contains "--sandbox-docker cannot work here"
 }
+
+# --- --sandbox-ro (read-only host mounts) -----------------------------------
+# The flag mounts a host directory or file read-only at its own path. These pin
+# down that it happens only when asked, lands at the physical path, refuses the
+# paths that would widen what the agent can read or write, and survives the
+# tmux round trip.
+
+# The physical path, as the launcher will mount it. On macOS $TESTDIR is under
+# /var/folders, which is really /private/var.
+phys() { (cd "$1" && pwd -P); }
+
+ro_setup() {
+    DATA="$TESTDIR/shared data"
+    mkdir -p "$DATA"
+    echo shared > "$DATA/in.csv"
+    DATA=$(phys "$DATA")
+    cd "$PROJECT"
+    : > "$FAKE_DOCKER_ARGV"
+}
+
+@test "no read-only mount unless --sandbox-ro is given" {
+    ro_setup
+    run bash "$LAUNCH"
+    assert_success
+    argv_lacks ":ro"
+    refute_output_contains "read-only:"
+}
+
+@test "--sandbox-ro mounts the path read-only, at its own path, and says so" {
+    ro_setup
+    run bash "$LAUNCH" --sandbox-ro "$DATA"
+    assert_success
+    argv_has "-v"
+    argv_has "$DATA:$DATA:ro"
+    assert_output_contains "read-only: $DATA"
+    # The hardening is untouched by the feature.
+    argv_has "--cap-drop=ALL"
+    argv_has "--security-opt=no-new-privileges"
+}
+
+@test "--sandbox-ro=PATH is the same flag" {
+    ro_setup
+    run bash "$LAUNCH" "--sandbox-ro=$DATA"
+    assert_success
+    argv_has "$DATA:$DATA:ro"
+}
+
+@test "--sandbox-ro is repeatable, and the mounts keep their order" {
+    ro_setup
+    mkdir -p "$TESTDIR/second"
+    local second; second=$(phys "$TESTDIR/second")
+    run bash "$LAUNCH" --sandbox-ro "$DATA" "--sandbox-ro=$second"
+    assert_success
+    argv_has "$DATA:$DATA:ro"
+    argv_has "$second:$second:ro"
+    local a b
+    a=$(grep -nxF -- "$DATA:$DATA:ro" "$FAKE_DOCKER_ARGV" | cut -d: -f1)
+    b=$(grep -nxF -- "$second:$second:ro" "$FAKE_DOCKER_ARGV" | cut -d: -f1)
+    [ "$a" -lt "$b" ] || fail_with "expected $DATA before $second in argv"
+}
+
+@test "the same path given twice is mounted once" {
+    ro_setup
+    run bash "$LAUNCH" --sandbox-ro "$DATA" --sandbox-ro "$DATA/"
+    assert_success
+    [ "$(grep -cxF -- "$DATA:$DATA:ro" "$FAKE_DOCKER_ARGV")" -eq 1 ] \
+        || fail_with "expected exactly one mount of $DATA"
+}
+
+@test "a relative path resolves against the current directory" {
+    ro_setup
+    run bash "$LAUNCH" --sandbox-ro "../shared data"
+    assert_success
+    argv_has "$DATA:$DATA:ro"
+    argv_lacks "../shared data"
+}
+
+@test "a symlinked directory is mounted at its physical path" {
+    ro_setup
+    ln -s "$DATA" "$TESTDIR/alias"
+    run bash "$LAUNCH" --sandbox-ro "$TESTDIR/alias"
+    assert_success
+    argv_has "$DATA:$DATA:ro"
+    argv_lacks "alias"
+}
+
+@test "a single file can be mounted read-only" {
+    ro_setup
+    run bash "$LAUNCH" --sandbox-ro "$DATA/in.csv"
+    assert_success
+    argv_has "$DATA/in.csv:$DATA/in.csv:ro"
+}
+
+@test "a path that does not exist is refused, and nothing starts" {
+    ro_setup
+    : > "$FAKE_DOCKER_LOG"
+    run bash "$LAUNCH" --sandbox-ro "$TESTDIR/nope"
+    assert_failure
+    assert_output_contains "--sandbox-ro: $TESTDIR/nope does not exist"
+    refute_docker_ran 'docker run'
+}
+
+@test "a system path is refused" {
+    ro_setup
+    : > "$FAKE_DOCKER_LOG"
+    run bash "$LAUNCH" --sandbox-ro /etc
+    assert_failure
+    assert_output_contains "/etc is a system path inside the container"
+    refute_docker_ran 'docker run'
+}
+
+@test "the home directory is refused, and so is anything above it" {
+    ro_setup
+    : > "$FAKE_DOCKER_LOG"
+    run bash "$LAUNCH" --sandbox-ro "$HOME"
+    assert_failure
+    assert_output_contains "contains your home directory"
+    assert_output_contains "read-only is not confidentiality"
+    run bash "$LAUNCH" --sandbox-ro "$TESTDIR"
+    assert_failure
+    assert_output_contains "contains your home directory"
+    refute_docker_ran 'docker run'
+}
+
+@test "the project itself is refused" {
+    ro_setup
+    : > "$FAKE_DOCKER_LOG"
+    run bash "$LAUNCH" --sandbox-ro .
+    assert_failure
+    assert_output_contains "is the project, which is already mounted writable"
+    refute_docker_ran 'docker run'
+}
+
+@test "a directory containing the project is refused" {
+    ro_setup
+    mkdir -p "$TESTDIR/tree/proj"
+    cd "$TESTDIR/tree/proj"
+    : > "$FAKE_DOCKER_LOG"
+    # HOME is moved aside so the home rule does not answer first: this is the
+    # project rule under test. XDG_* keep the launcher's own state where it was.
+    HOME="$TESTDIR/elsewhere" run bash "$LAUNCH" --sandbox-ro ..
+    assert_failure
+    assert_output_contains "contains the project, which is mounted writable"
+    refute_docker_ran 'docker run'
+}
+
+@test "SANDBOX_WORKDIR does not change which directory counts as the project" {
+    ro_setup
+    : > "$FAKE_DOCKER_LOG"
+    SANDBOX_WORKDIR=/workspace run bash "$LAUNCH" --sandbox-ro .
+    assert_failure
+    assert_output_contains "is the project"
+    refute_docker_ran 'docker run'
+}
+
+@test "a path inside the project is accepted, and pins that part read-only" {
+    ro_setup
+    mkdir -p "$PROJECT/fixtures"
+    local fx; fx=$(phys "$PROJECT/fixtures")
+    run bash "$LAUNCH" --sandbox-ro fixtures
+    assert_success
+    argv_has "$fx:$fx:ro"
+}
+
+@test "--sandbox-ro is stripped rather than passed to the agent" {
+    ro_setup
+    run bash "$LAUNCH" --sandbox-ro "$DATA" --dangerously-skip-permissions
+    assert_success
+    argv_has "--dangerously-skip-permissions"
+    argv_lacks "--sandbox-ro"
+}
+
+@test "--sandbox-ro is only honoured in first position" {
+    ro_setup
+    run bash "$LAUNCH" --print --sandbox-ro /etc
+    assert_success
+    argv_has "--sandbox-ro"
+    argv_has "/etc"
+    argv_lacks ":ro"
+}
+
+@test "--sandbox-ro without a path is refused" {
+    ro_setup
+    : > "$FAKE_DOCKER_LOG"
+    run bash "$LAUNCH" --sandbox-ro
+    assert_failure
+    assert_output_contains "--sandbox-ro needs a path"
+    refute_docker_ran 'docker run'
+}
+
+@test "--sandbox-ro composes with --sandbox-git and --sandbox-docker in any order" {
+    ro_setup
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    run bash "$LAUNCH" --sandbox-docker --sandbox-ro "$DATA" --sandbox-git
+    assert_success
+    argv_has "$DATA:$DATA:ro"
+    argv_has "$FAKE_SOCK:/var/run/docker.sock"
+    argv_has "SANDBOX_GIT_TOKEN=s3cret"
+    : > "$FAKE_DOCKER_ARGV"
+    run bash "$LAUNCH" --sandbox-git --sandbox-docker "--sandbox-ro=$DATA"
+    assert_success
+    argv_has "$DATA:$DATA:ro"
+    argv_has "SANDBOX_GIT_TOKEN=s3cret"
+}
+
+@test "--sandbox-ro composes with --sandbox-tmux by re-emitting the resolved flag" {
+    ro_setup
+    # Given relative, carried absolute: the session re-runs the launcher, and
+    # %q keeps the space in the path as one argument.
+    run bash "$LAUNCH" --sandbox-ro "../shared data" --sandbox-tmux
+    assert_success
+    tmux_log_has "--sandbox-ro=$(printf '%q' "$DATA")"
+    refute_tmux_log "../shared"
+}
+
+@test "a refused path creates no tmux session" {
+    ro_setup
+    run bash "$LAUNCH" --sandbox-ro "$TESTDIR/nope" --sandbox-tmux
+    assert_failure
+    assert_output_contains "does not exist"
+    refute_tmux_log "new-session"
+}
+
+@test "--sandbox-doctor lists read-only mounts, and says why one would be refused" {
+    ro_setup
+    run bash "$LAUNCH" --sandbox-ro "$DATA" --sandbox-ro "$TESTDIR/nope" --sandbox-ro . --sandbox-doctor
+    assert_success
+    assert_output_contains "read-only mount     $DATA -> $DATA"
+    assert_output_contains "$TESTDIR/nope REFUSED — does not exist"
+    assert_output_contains ". REFUSED — "
+    assert_output_contains "is the project"
+    refute_docker_ran 'docker run -it'
+}
+
+@test "the codex launcher takes --sandbox-ro too" {
+    bash "$(installer codex)" >/dev/null 2>&1
+    ro_setup
+    FAKE_CODEX_VERSION=1.2.3 run bash "$HOME/.local/bin/codex-sandbox" --sandbox-ro "$DATA"
+    assert_success
+    argv_has "$DATA:$DATA:ro"
+    argv_has "codex-config-testuser:/home/agent/.codex"
+    argv_lacks "--sandbox-ro"
+}

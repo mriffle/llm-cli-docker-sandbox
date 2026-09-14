@@ -2,7 +2,7 @@
 #
 #  THIS FILE IS GENERATED — do not edit it directly.
 #  Source: src/, assembled by tools/build.sh. Edit there and rebuild.
-#  Version 1.2.0
+#  Version 1.3.0
 #
 #
 # Codex CLI sandbox installer.
@@ -13,7 +13,7 @@
 # a per-user image, and the named volume that holds your login. Re-run to upgrade.
 set -euo pipefail
 
-INSTALLER_VERSION="1.2.0"
+INSTALLER_VERSION="1.3.0"
 RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
 REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
@@ -1071,7 +1071,7 @@ cat <<'__SANDBOX_ASSET_EOF__'
 # NOTE: Codex has no auto-updater — version is baked at build time.
 # The launcher rebuilds when a new version ships.
 #
-# Managed by the agent-sandbox installer (v1.2.0). Re-running the
+# Managed by the agent-sandbox installer (v1.3.0). Re-running the
 # installer rewrites this file; local edits are backed up first.
 
 FROM node:24-slim
@@ -1142,7 +1142,7 @@ cat <<'__SANDBOX_ASSET_EOF__'
 #!/usr/bin/env bash
 # codex-sandbox — run Codex CLI sandboxed in the current directory.
 #
-# Installed by the agent-sandbox installer (v1.2.0):
+# Installed by the agent-sandbox installer (v1.3.0):
 #   curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.sh | bash
 # Edits here are backed up, not preserved, when you upgrade.
 #
@@ -1158,7 +1158,7 @@ IMAGE_BASENAME=codex-sandbox
 LAUNCHER_NAME=codex-sandbox
 
 # --- shared launcher machinery (generated; see https://github.com/mriffle/llm-cli-docker-sandbox) ----------------
-SANDBOX_VERSION="1.2.0"
+SANDBOX_VERSION="1.3.0"
 RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
 REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
@@ -1280,17 +1280,24 @@ host_workdir() {
 #   `agent` would otherwise expose their entire home directory to a session
 #   that is supposed to see nothing but the project.
 # The fallback warns. A silent one would rebuild the collision invisibly.
+# True for a path that must not be mounted over inside the container: not
+# absolute, one of the reserved directories above, or the agent's own home.
+# Shared by the project mount and by --sandbox-ro.
+reserved_container_path() {
+    case "$1" in
+        /home/agent|/home/agent/*) return 0 ;;
+        /|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/media|/mnt|/opt) return 0 ;;
+        /proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var) return 0 ;;
+        /*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 container_workdir() {
     local p
     if [ -n "${SANDBOX_WORKDIR:-}" ]; then printf '%s' "$SANDBOX_WORKDIR"; return; fi
     p=$(host_workdir)
-    case "$p" in
-        /home/agent|/home/agent/*) p='' ;;
-        /|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/media|/mnt|/opt) p='' ;;
-        /proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var) p='' ;;
-        /*) ;;
-        *) p='' ;;
-    esac
+    if reserved_container_path "$p"; then p=''; fi
     if [ -z "$p" ]; then
         lwarn "cannot mirror $(host_workdir) inside the container; using /workspace"
         lwarn "(the agent's memory and session history there are shared with other such projects)"
@@ -1510,6 +1517,82 @@ docker_sock_args() {
     fi
 }
 
+# --- read-only host mounts -------------------------------------------------
+# --sandbox-ro PATH bind-mounts a host directory or file into the session
+# read-only, at the same path it has on the host — for the same reasons the
+# project is mirrored: absolute symlinks inside the data resolve, paths the
+# agent prints resolve on the host, and a sibling container started through
+# --sandbox-docker can name the same path. Write access stays exactly the
+# project.
+#
+# Read-only is not confidentiality. Egress is open, so anything mounted can be
+# read and shipped by a prompt-injected session. That is why the home
+# directory and its ancestors are refused outright rather than warned about:
+# they hold ~/.ssh and friends by construction. Mount data, not homes.
+RO_PATHS=()   # as given on the command line, in order
+RO_FLAGS=()   # --sandbox-ro=PATH, resolved, re-emitted into a tmux session
+RO_ARGS=()    # -v src:src:ro pairs; both built by ro_mount_args
+
+# The physical path, like host_workdir, so one directory reached two ways is
+# one mount. Files are allowed: a single CSV is a fair thing to share. Fails
+# for a path that is not there or cannot be entered.
+resolve_ro_path() {
+    local p=$1 dir
+    if [ -d "$p" ]; then
+        (unset CDPATH; cd -- "$p" 2>/dev/null && pwd -P)
+    elif [ -e "$p" ]; then
+        dir=$(unset CDPATH; cd -- "$(dirname "$p")" 2>/dev/null && pwd -P) || return 1
+        printf '%s/%s' "$dir" "$(basename "$p")"
+    else
+        return 1
+    fi
+}
+
+# The reason a resolved path cannot be mounted, or nothing when it can. Shared
+# by the launch (which refuses) and by doctor (which reports).
+ro_check_path() {
+    local src=$1 home proj
+    home=${HOME:-}
+    proj=$(host_workdir)
+    if reserved_container_path "$src"; then
+        printf '%s is a system path inside the container' "$src"; return
+    fi
+    if [ -n "$home" ]; then
+        case "$home" in
+            "$src"|"$src"/*) printf '%s contains your home directory, and read-only is not confidentiality' "$src"; return ;;
+        esac
+    fi
+    # host_workdir, not container_workdir: SANDBOX_WORKDIR moves the project's
+    # mount point, not the directory that is mounted writable.
+    case "$proj" in
+        "$src") printf '%s is the project, which is already mounted writable' "$src"; return ;;
+        "$src"/*) printf '%s contains the project, which is mounted writable' "$src"; return ;;
+    esac
+}
+
+ro_mount_args() {
+    local given src reason seen nl
+    RO_ARGS=()
+    RO_FLAGS=()
+    seen=''
+    nl='
+'
+    for given in ${RO_PATHS[@]+"${RO_PATHS[@]}"}; do
+        if ! src=$(resolve_ro_path "$given"); then
+            # Refuse rather than let docker create the path on the host as a
+            # root-owned directory and mount that.
+            ldie "--sandbox-ro: $given does not exist (or cannot be entered)"
+        fi
+        reason=$(ro_check_path "$src")
+        [ -z "$reason" ] || ldie "--sandbox-ro: $reason"
+        case "$seen" in *"$nl$src$nl"*) continue ;; esac
+        seen="$seen$nl$src$nl"
+        lwarn "read-only: $src"
+        RO_ARGS+=(-v "$src:$src:ro")
+        RO_FLAGS+=("--sandbox-ro=$src")
+    done
+}
+
 run_container() {
     local src dst
     src=$(host_workdir)
@@ -1523,6 +1606,7 @@ run_container() {
         -v "$src:$dst" \
         -w "$dst" \
         "${MOUNT_ARGS[@]}" \
+        ${RO_ARGS[@]+"${RO_ARGS[@]}"} \
         ${GIT_ENV_ARGS[@]+"${GIT_ENV_ARGS[@]}"} \
         ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} \
         --cap-drop=ALL \
@@ -1577,11 +1661,12 @@ tmux_launch() {
 
     ensure_docker_and_image
     self=$(launcher_self)
-    # %q keeps arguments with spaces intact through tmux's shell.
-    cmd=$(printf '%q ' "$self" "$@")
-    # --sandbox-git and --sandbox-docker were consumed before the dispatch, so
-    # they are no longer in "$@"; carry the decisions into the session as
-    # environment instead.
+    # %q keeps arguments with spaces intact through tmux's shell — including
+    # the --sandbox-ro=PATH flags, which were consumed before the dispatch and
+    # are re-emitted here so the session's own launch sees them again.
+    cmd=$(printf '%q ' "$self" ${RO_FLAGS[@]+"${RO_FLAGS[@]}"} "$@")
+    # --sandbox-git and --sandbox-docker were consumed too; being booleans,
+    # they travel as environment instead.
     cmd="SANDBOX_IN_TMUX=1 ${SANDBOX_GIT:+SANDBOX_GIT=1 }${SANDBOX_DOCKER:+SANDBOX_DOCKER=1 }$cmd; ec=\$?; if [ \$ec -ne 0 ]; then printf 'exited with status %s — press Enter to close\\n' \"\$ec\"; read -r _; fi"
 
     tmux new-session -d -s "$session" -c "$PWD" "$cmd" \
@@ -1597,11 +1682,25 @@ tmux_launch() {
 
 # --- doctor ----------------------------------------------------------------
 doctor() {
-    local manifest vol owner latest label_uid name email host sock gid
+    local manifest vol owner latest label_uid name email host sock gid ro src reason
     printf '%s sandbox — doctor\n' "$AGENT_NAME"
     printf '  launcher version    %s (%s)\n' "$SANDBOX_VERSION" "$(launcher_self)"
     printf '  user / uid          %s / %s\n' "$(sandbox_user)" "$(id -u)"
     printf '  project mount       %s -> %s\n' "$(host_workdir)" "$(container_workdir)"
+    # What --sandbox-ro would mount, or why it would refuse. Reported, never
+    # fatal: doctor is for finding out.
+    for ro in ${RO_PATHS[@]+"${RO_PATHS[@]}"}; do
+        if ! src=$(resolve_ro_path "$ro"); then
+            printf '  read-only mount     %s REFUSED — does not exist (or cannot be entered)\n' "$ro"
+            continue
+        fi
+        reason=$(ro_check_path "$src")
+        if [ -n "$reason" ]; then
+            printf '  read-only mount     %s REFUSED — %s\n' "$ro" "$reason"
+        else
+            printf '  read-only mount     %s -> %s\n' "$src" "$src"
+        fi
+    done
 
     if ! have docker; then printf '  docker              NOT INSTALLED\n'; return 1; fi
     if ! docker info >/dev/null 2>&1; then printf '  docker              UNREACHABLE\n'; return 1; fi
@@ -1728,6 +1827,7 @@ which are only recognised in first position:
 
   --sandbox-git [args...]            also forward a git credential (see below)
   --sandbox-docker [args...]         also mount the host Docker socket (see below)
+  --sandbox-ro PATH [args...]        also mount PATH read-only, repeatable (see below)
   --sandbox-tmux [args...]           run inside a tmux session for this project
   --sandbox-tmux-detached [args...]  same, but do not attach
   --sandbox-doctor                   report on image, volumes, UIDs and versions
@@ -1747,6 +1847,16 @@ session. It grants nothing you did not already have — talking to the daemon is
 root-equivalent on a rootful one — but it hands that to an autonomous agent.
 Bind mounts of the project work because the project keeps its host path; a path
 that only exists inside the container silently mounts as an empty directory.
+
+--sandbox-ro PATH (or --sandbox-ro=PATH) mounts a host directory or file into
+the session read-only, at the same path it has on the host. Repeat it for more.
+Relative paths resolve against the current directory. Write access stays
+exactly the project, so a path that is the project or contains it is refused,
+as is a path that does not exist, a system path, and your home directory or
+anything above it: read-only is not confidentiality, and egress is open. A
+path inside the project works, and pins that part of the project read-only.
+Note that --sandbox-docker bypasses this: a sibling container can mount the
+same path writable.
 
 The project is mounted inside the container at the same path it has on the
 host, so each project keeps its own agent memory, session history and
@@ -1773,6 +1883,9 @@ launcher_main() {
         case "$1" in
             --sandbox-git)    SANDBOX_GIT=1; shift ;;
             --sandbox-docker) SANDBOX_DOCKER=1; shift ;;
+            --sandbox-ro)     [ $# -ge 2 ] || ldie "--sandbox-ro needs a path"
+                              RO_PATHS+=("$2"); shift 2 ;;
+            --sandbox-ro=*)   RO_PATHS+=("${1#*=}"); shift ;;
             *) break ;;
         esac
     done
@@ -1780,6 +1893,11 @@ launcher_main() {
         --sandbox-help)           launcher_usage; exit 0 ;;
         --sandbox-version)        printf '%s\n' "$SANDBOX_VERSION"; exit 0 ;;
         --sandbox-doctor)         doctor; exit $? ;;
+    esac
+    # Resolve and refuse here, before a tmux session exists: a bad path should
+    # fail at the prompt, not inside a pane waiting for Enter.
+    ro_mount_args
+    case "${1:-}" in
         --sandbox-upgrade)        shift; do_upgrade "$@"; exit $? ;;
         --sandbox-tmux)           shift; tmux_launch attach "$@"; exit $? ;;
         --sandbox-tmux-detached)  shift; tmux_launch detach "$@"; exit $? ;;
@@ -1862,7 +1980,7 @@ __asset_ASSET_CONFIG_TOML() {
 cat <<'__SANDBOX_ASSET_EOF__'
 # Codex autonomy inside the container. The container is the security
 # boundary, so Codex's own OS-level sandbox is turned off and approvals
-# are disabled. Seeded by the agent-sandbox installer (v1.2.0);
+# are disabled. Seeded by the agent-sandbox installer (v1.3.0);
 # your edits here are preserved across upgrades.
 approval_policy = "never"
 sandbox_mode = "danger-full-access"

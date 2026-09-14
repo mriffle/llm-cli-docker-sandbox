@@ -171,3 +171,15 @@ RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
         assert_file_contains "$REPO_ROOT/.github/workflows/test.yml" "$job"
     done
 }
+
+@test "the README documents --sandbox-ro as both launchers implement it" {
+    # From v1.3.0 a launch can mount extra host paths, read-only. The security
+    # note that promised "no host path but $PWD" would otherwise be a false
+    # claim in the section people read to decide whether to trust this.
+    assert_file_contains "$REPO_ROOT/README.md" '--sandbox-ro'
+    refute_file_contains "$REPO_ROOT/README.md" 'the one exception being the Docker socket'
+    grep -qF -- '--sandbox-ro' "$REPO_ROOT/install/claude.ps1" \
+        || fail_with "the PowerShell launcher never mentions --sandbox-ro"
+    grep -qF -- ':ro' "$REPO_ROOT/MANUAL.md" \
+        || fail_with "MANUAL.md does not show the hand-built read-only mount"
+}

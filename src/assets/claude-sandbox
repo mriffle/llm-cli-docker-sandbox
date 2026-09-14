@@ -5,9 +5,9 @@
 #   curl -fsSL @@RAW_BASE@@/install/claude.sh | bash
 # Edits here are backed up, not preserved, when you upgrade.
 #
-# The only host path the container can see is $PWD. Auth and the
-# self-updated claude binary live in per-user named volumes, so they
-# survive every rebuild.
+# The only host path the container can write is $PWD; --sandbox-ro adds
+# others, read-only. Auth and the self-updated claude binary live in
+# per-user named volumes, so they survive every rebuild.
 set -uo pipefail
 
 AGENT=claude

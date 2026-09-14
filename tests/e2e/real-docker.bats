@@ -346,6 +346,49 @@ e2e_sock_gid() {
     assert_output_contains "written-on-the-host"
 }
 
+# --- --sandbox-ro against the real daemon ----------------------------------
+# The launcher's own argv is pinned by the integration tests; these check that
+# the mount docker actually makes behaves as promised.
+
+@test "e2e: a read-only mount can be read, cannot be written, and leaves the project writable" {
+    local data="$BATS_TEST_TMPDIR/shared data" proj="$BATS_TEST_TMPDIR/ro project"
+    mkdir -p "$data" "$proj"
+    echo shared-on-the-host > "$data/in.txt"
+    run docker run --rm -v "$proj:$proj" -w "$proj" -v "$data:$data:ro" \
+        --cap-drop=ALL --security-opt=no-new-privileges "$CLAUDE_IMAGE" \
+        sh -c 'cat "$1/in.txt"; touch "$1/out.txt" 2>&1; echo written-by-agent > proof.txt' sh "$data"
+    assert_success
+    assert_output_contains "shared-on-the-host"
+    assert_output_contains "Read-only file system"
+    [ ! -e "$data/out.txt" ] || fail_with "the read-only mount took a write"
+    [ "$(cat "$proj/proof.txt")" = "written-by-agent" ]
+}
+
+@test "e2e: a read-only path inside the project pins that part, and only that part" {
+    # The launcher allows a --sandbox-ro path under the project. It works
+    # because docker applies the deeper mount on top of the shallower one; if
+    # that ever changes, the launcher must start refusing such paths.
+    local proj="$BATS_TEST_TMPDIR/nested project"
+    mkdir -p "$proj/fixtures"
+    echo fixture > "$proj/fixtures/a.txt"
+    run docker run --rm -v "$proj:$proj" -w "$proj" -v "$proj/fixtures:$proj/fixtures:ro" \
+        --cap-drop=ALL --security-opt=no-new-privileges "$CLAUDE_IMAGE" \
+        sh -c 'cat fixtures/a.txt; touch fixtures/b.txt 2>&1; echo written-by-agent > proof.txt'
+    assert_success
+    assert_output_contains "fixture"
+    assert_output_contains "Read-only file system"
+    [ ! -e "$proj/fixtures/b.txt" ] || fail_with "the nested read-only mount took a write"
+    [ "$(cat "$proj/proof.txt")" = "written-by-agent" ]
+}
+
+@test "e2e: --sandbox-doctor reports a read-only mount as it would be made" {
+    local data="$BATS_TEST_TMPDIR/doctor data"
+    mkdir -p "$data"
+    run "$HOME/.local/bin/claude-sandbox" --sandbox-ro "$data" --sandbox-doctor
+    assert_success
+    assert_output_contains "read-only mount     $data -> $data"
+}
+
 @test "e2e: uninstall removes the image but keeps the login volumes" {
     run bash "$REPO_ROOT/install/codex.sh" --uninstall
     assert_success

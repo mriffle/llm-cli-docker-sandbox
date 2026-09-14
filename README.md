@@ -89,6 +89,7 @@ Everything else you pass is handed to the agent untouched. The launcher recognis
 | --- | --- |
 | `--sandbox-git` | also forward a git credential, so the agent can push — see [Git](#git) |
 | `--sandbox-docker` | also mount the host Docker socket, so the agent can use Docker — see [Docker](#docker-inside-the-sandbox) |
+| `--sandbox-ro PATH` | also mount a host directory or file read-only; repeatable — see [Sharing read-only data](#sharing-read-only-data) |
 | `--sandbox-tmux` / `--sandbox-tmux-detached` | run inside a tmux session for this project |
 | `--sandbox-doctor` | report on image, volumes, UIDs, versions — start here when something's wrong |
 | `--sandbox-upgrade` | re-run the installer to update |
@@ -182,6 +183,50 @@ whether or not you pass the flag. The Docker CLI (plus `buildx` and `compose`)
 is in the image either way — without the socket it simply has no daemon to talk
 to, and says so.
 
+## Sharing read-only data
+
+Some work needs more than the project: a dataset next to it, a reference
+checkout, fixtures the agent should read but never touch. `--sandbox-ro`
+mounts a host directory (or a single file) into the session **read-only**, and
+can be repeated:
+
+```bash
+claude-sandbox --sandbox-ro ~/data/genome --sandbox-ro=../reference-impl --dangerously-skip-permissions
+```
+
+Write access stays exactly what it was: the project, and nothing else.
+
+**Where it lands.** At the same path it has on the host, for the same reasons
+[the project does](#why-the-project-keeps-its-own-path-inside-the-container):
+absolute symlinks inside the data resolve, paths the agent prints resolve on
+your side, and a sibling container started with `--sandbox-docker` can name the
+same directory. Relative paths resolve against the directory you launch from,
+symlinks against what they point at, and on native Windows `D:\data` becomes
+`/mnt/d/data` like the project. The launcher prints one `read-only: …` line per
+mount at launch, and `--sandbox-doctor` shows what it would do without
+launching.
+
+**What is refused**, before anything starts, each with a one-line reason:
+
+- **A path that does not exist.** Docker would create it on the host as a
+  root-owned directory and mount that.
+- **A system path** (`/etc`, `/usr`, `/tmp`, …) or anything under the agent's
+  own home, which is where the volumes live.
+- **Your home directory, or anything above it.** Read-only is not
+  confidentiality: egress is open, so a prompt-injected session can read
+  `~/.ssh` and ship it just as well as it can read a CSV. Mount data, not
+  homes.
+- **The project, or a directory containing it.** The project is already
+  mounted writable, and it stays the only thing that is.
+
+A path *inside* the project is allowed and useful: `--sandbox-ro fixtures`
+pins that directory read-only while the rest of the project stays writable.
+Two things the flag does not do: it grants nothing you could not already read
+(the bind mount keeps host permissions, and the agent runs as your UID), and it
+does not survive `--sandbox-docker` — a sibling container the agent starts can
+mount the same path writable, which is one more reason that flag is a
+deliberate opt-in.
+
 ## Upgrading
 
 **Re-run the same install command.** It is idempotent: it compares what's on disk against what it ships, rewrites only what changed, and rebuilds the image only if the Dockerfile changed. Your login volumes are never touched.
@@ -240,6 +285,7 @@ Nothing outside these paths is touched, except one guarded two-line block append
 | `~/.codex` | `codex-config-$USER` volume | auth, `config.toml`, state DB — permanent |
 | git identity (and, with `--sandbox-git`, a credential) | environment only | that session — never written to a volume or a file |
 | `/var/run/docker.sock`, only with `--sandbox-docker` | bind mount of the host socket | that session — see [Docker inside the sandbox](#docker-inside-the-sandbox) |
+| each `--sandbox-ro` path, at its own path | read-only bind mount | that session — the agent can read it, never write it |
 | everything else (`~/.cargo`, `~/.npm-global`, …) | container layer | discarded at session exit |
 
 Plugins installed via `/plugin install` live in the config volume, so they persist and are shared across all of that user's projects.
@@ -305,7 +351,7 @@ If something looks wrong, `claude-sandbox --sandbox-doctor` (or `codex-sandbox -
 ## Security notes
 
 - **The container is the entire boundary.** In bypass/yolo mode, a prompt-injected or misbehaving session can do anything *inside* it: modify the mounted project, read the agent credentials in its volume, and reach the open network. Only run against repositories you trust.
-- **Never mount host secrets** (`~/.ssh`, cloud credential files, `~/.gitconfig` with tokens) into the container. The launchers mount no host path but `$PWD` — the one exception being the Docker socket, and only when you ask for it with `--sandbox-docker`. Git identity and, with `--sandbox-git`, a git credential are passed as *environment*, resolved on the host, for one session.
+- **Never mount host secrets** (`~/.ssh`, cloud credential files, `~/.gitconfig` with tokens) into the container. The launchers mount no host path but `$PWD` unless you ask: `--sandbox-ro` adds paths read-only, and `--sandbox-docker` adds the Docker socket. Read-only is not confidentiality — anything mounted can be read and, with open egress, exfiltrated — which is why `--sandbox-ro` refuses your home directory and anything above it outright. Git identity and, with `--sandbox-git`, a git credential are passed as *environment*, resolved on the host, for one session.
 - **A forwarded git credential is a real grant.** `--sandbox-git` is opt-in per launch for that reason. It is scoped to the origin remote's host, but within that host the token's own permissions apply, and an autonomous session that is prompt-injected can use it or exfiltrate it (egress is open — see below). Prefer a fine-grained, revocable token over one with broad `repo` scope, and leave the flag off when the agent has no reason to push. Identity alone (the default) carries no secret.
 - **Egress is unrestricted by default** in these launchers. For defense against exfiltration, adapt the default-deny firewall from Anthropic's [reference devcontainer](https://github.com/anthropics/claude-code/tree/main/.devcontainer) (`init-firewall.sh` + `NET_ADMIN`/`NET_RAW` caps) — and be prepared to maintain a domain allowlist for package registries your projects use.
 - **The Docker socket is a conscious opt-in, and it ends the sandbox.** By default no socket is mounted and no privileged flags are passed; the Docker CLI that ships in the image has no daemon to reach. `--sandbox-docker` changes that for one session, and with it an autonomous agent can start a sibling container that mounts any host path — that is a sandbox escape by design, not a bug in it. It escalates nothing you did not already hold (docker access without `sudo` is root-equivalent on a rootful daemon), but it delegates that to a session that can be prompt-injected. Use [rootless Docker](https://docs.docker.com/engine/security/rootless/) if you use the flag routinely, and see [Docker inside the sandbox](#docker-inside-the-sandbox). Mounting the socket `:ro` is not a mitigation — it restricts the mount, not the API.

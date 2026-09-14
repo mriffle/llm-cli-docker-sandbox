@@ -38,8 +38,8 @@ plus two Docker images and three named volumes that the launchers create and mai
 
 The installers create the same files, with two additions: a manifest under
 `~/.local/share/agent-sandbox/` recording what was installed, and launchers that
-carry `--sandbox-tmux`, `--sandbox-docker`, `--sandbox-doctor` and
-`--sandbox-upgrade`. The hand-built launchers below are the plain versions.
+carry `--sandbox-tmux`, `--sandbox-docker`, `--sandbox-ro`, `--sandbox-doctor`
+and `--sandbox-upgrade`. The hand-built launchers below are the plain versions.
 
 These instructions target Linux and macOS hosts. **Windows users:** see
 [WINDOWS.md](WINDOWS.md).
@@ -250,6 +250,14 @@ Notes:
   ```
 
   A supplementary group is applied before capabilities are dropped, so this works alongside `--cap-drop=ALL` and `--security-opt=no-new-privileges` — which is also the point: those flags protect the sandbox, not the sibling containers the agent starts through the socket. Anything it launches can mount any host path. The containers are siblings on your daemon, so their `-v` sources are host paths; that works because the project is mounted at its own host path, and a path that exists only inside the container will silently mount as an empty directory. The installed launcher does all of this behind `--sandbox-docker`, and warns every time.
+- **To share data the agent may read but not modify**, add a read-only bind mount at the same host path, one per directory or file:
+
+  ```bash
+  # ...add to the docker run above:
+  #   -v /data/genome:/data/genome:ro \
+  ```
+
+  Mirroring the host path keeps absolute symlinks inside the data working and makes the paths the agent prints resolve on the host. Read-only is not confidentiality — the agent can still read and, with open egress, exfiltrate whatever you mount — so never mount your home directory this way. The installed launcher does this behind `--sandbox-ro`, and refuses the home directory, the project's ancestors, system paths and paths that do not exist.
 - No resource limits are set. If runaway sessions on a shared box ever become a problem, add `--memory`, `--cpus`, and `--pids-limit` here.
 
 ### Setup (per user)

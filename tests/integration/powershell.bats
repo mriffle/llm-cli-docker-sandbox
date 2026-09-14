@@ -570,3 +570,96 @@ ps_argv_lacks() {
     assert_output_contains 'ignored on native Windows'
     refute_docker_ran 'docker.sock'
 }
+
+# --- --sandbox-ro (read-only host mounts) -----------------------------------
+# The mirror of the shell launcher's flag. This job runs under pwsh on Linux,
+# so the host paths are POSIX; the Windows-path translation is driven through
+# SANDBOX_FAKE_PWD plus the SANDBOX_FAKE_RO_EXISTS seam, since C:\ cannot exist
+# here.
+
+ps_ro_setup() {
+    ps_install claude
+    DATA="$TESTDIR/shared data"
+    mkdir -p "$DATA" "$TESTDIR/proj"
+    echo shared > "$DATA/in.csv"
+    DATA=$(cd "$DATA" && pwd -P)
+    cd "$TESTDIR/proj"
+    : > "$FAKE_DOCKER_ARGV"
+}
+
+@test "ps launcher: --sandbox-ro mounts the path read-only at its own path" {
+    ps_ro_setup
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro "$DATA" --dangerously-skip-permissions
+    assert_success
+    grep -qxF -- "-v" "$FAKE_DOCKER_ARGV"
+    grep -qxF -- "$DATA:$DATA:ro" "$FAKE_DOCKER_ARGV"
+    grep -qxF -- "--dangerously-skip-permissions" "$FAKE_DOCKER_ARGV"
+    assert_output_contains "read-only: $DATA"
+    ps_argv_lacks "--sandbox-ro"
+    if grep -qx -- '' "$FAKE_DOCKER_ARGV"; then fail_with "an empty argument reached docker"; fi
+}
+
+@test "ps launcher: --sandbox-ro=PATH, repeated, relative, and a file" {
+    ps_ro_setup
+    run "$PWSH" -NoProfile -File "$LAUNCHER" "--sandbox-ro=../shared data" --sandbox-ro "$DATA/in.csv" --sandbox-ro "$DATA"
+    assert_success
+    grep -qxF -- "$DATA:$DATA:ro" "$FAKE_DOCKER_ARGV"
+    grep -qxF -- "$DATA/in.csv:$DATA/in.csv:ro" "$FAKE_DOCKER_ARGV"
+    [ "$(grep -cxF -- "$DATA:$DATA:ro" "$FAKE_DOCKER_ARGV")" -eq 1 ] \
+        || fail_with "expected exactly one mount of $DATA"
+}
+
+@test "ps launcher: a Windows path is mounted at its /mnt/<drive> translation" {
+    ps_ro_setup
+    SANDBOX_FAKE_RO_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' \
+        run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro 'D:\data' --sandbox-ro 'C:\Users\mike\proj\fixtures'
+    assert_success
+    # The source keeps its native form, which is what Docker Desktop expects;
+    # only the destination is translated, exactly like the project mount.
+    grep -qxF -- 'D:\data:/mnt/d/data:ro' "$FAKE_DOCKER_ARGV"
+    grep -qxF -- 'C:\Users\mike\proj\fixtures:/mnt/c/Users/mike/proj/fixtures:ro' "$FAKE_DOCKER_ARGV"
+}
+
+@test "ps launcher: --sandbox-ro refuses a missing path, home, the project, and their ancestors" {
+    ps_ro_setup
+    : > "$FAKE_DOCKER_LOG"
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro "$TESTDIR/nope"
+    assert_failure
+    assert_output_contains "does not exist"
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro "$HOME"
+    assert_failure
+    assert_output_contains "contains your home directory"
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro .
+    assert_failure
+    assert_output_contains "is the project, which is already mounted writable"
+    SANDBOX_FAKE_RO_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' SANDBOX_FAKE_HOME='D:\elsewhere' \
+        run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro 'C:\Users\mike'
+    assert_failure
+    assert_output_contains "contains the project, which is mounted writable"
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro /etc
+    assert_failure
+    assert_output_contains "is a system path inside the container"
+    refute_docker_ran 'docker run'
+}
+
+@test "ps launcher: --sandbox-ro without a path is refused, and past first position it is forwarded" {
+    ps_ro_setup
+    : > "$FAKE_DOCKER_LOG"
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro
+    assert_failure
+    assert_output_contains "--sandbox-ro needs a path"
+    refute_docker_ran 'docker run'
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --print --sandbox-ro /etc
+    assert_success
+    grep -qxF -- "--sandbox-ro" "$FAKE_DOCKER_ARGV"
+    ps_argv_lacks ":ro"
+}
+
+@test "ps launcher: --sandbox-doctor lists read-only mounts and refusals" {
+    ps_ro_setup
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro "$DATA" --sandbox-ro "$TESTDIR/nope" --sandbox-doctor
+    assert_success
+    assert_output_contains "read-only mount     $DATA -> $DATA"
+    assert_output_contains "$TESTDIR/nope REFUSED — does not exist"
+    refute_docker_ran 'docker run -it'
+}
