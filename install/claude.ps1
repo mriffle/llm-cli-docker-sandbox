@@ -2,7 +2,7 @@
 #
 #  THIS FILE IS GENERATED — do not edit it directly.
 #  Source: src/, assembled by tools/build.sh. Edit there and rebuild.
-#  Version 1.3.0
+#  Version 1.3.1
 #
 #
 #   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.ps1 | iex
@@ -26,7 +26,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$script:InstallerVersion = '1.3.0'
+$script:InstallerVersion = '1.3.1'
 $script:RawBase          = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
 $script:RepoUrl          = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $script:Agent            = 'claude'
@@ -698,7 +698,7 @@ $AssetDockerfile = @'
 # Anything else a project needs gets installed into that project's own
 # directory (./.jdk, ./.bin, etc.) — resist adding it here.
 #
-# Managed by the agent-sandbox installer (v1.3.0). Re-running the
+# Managed by the agent-sandbox installer (v1.3.1). Re-running the
 # installer rewrites this file; local edits are backed up first, but the
 # supported way to customise is to keep your own copy elsewhere and build
 # with --src-dir.
@@ -785,12 +785,12 @@ ENV CLAUDE_CONFIG_DIR=/home/agent/.claude
 $AssetLauncher = @'
 # claude-sandbox.ps1 — run Claude Code sandboxed in the current directory.
 #
-# Installed by the agent-sandbox installer (v1.3.0):
+# Installed by the agent-sandbox installer (v1.3.1):
 #   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.ps1 | iex
 # Edits here are backed up, not preserved, when you upgrade.
 $ErrorActionPreference = 'Stop'
 
-$SandboxVersion = '1.3.0'
+$SandboxVersion = '1.3.1'
 $RawBase        = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
 $RepoUrl        = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $Agent          = 'claude'
@@ -1330,7 +1330,7 @@ Invoke-LauncherMain @args
 $AssetShim = @'
 @echo off
 rem Shim so `claude-sandbox` works from cmd.exe and never trips execution policy.
-rem Installed by the agent-sandbox installer (v1.3.0).
+rem Installed by the agent-sandbox installer (v1.3.1).
 setlocal
 set "SANDBOX_PS1=%~dp0claude-sandbox.ps1"
 where pwsh >nul 2>nul

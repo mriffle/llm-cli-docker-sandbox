@@ -2,7 +2,7 @@
 #
 #  THIS FILE IS GENERATED — do not edit it directly.
 #  Source: src/, assembled by tools/build.sh. Edit there and rebuild.
-#  Version 1.3.0
+#  Version 1.3.1
 #
 #
 #   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.ps1 | iex
@@ -26,7 +26,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$script:InstallerVersion = '1.3.0'
+$script:InstallerVersion = '1.3.1'
 $script:RawBase          = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
 $script:RepoUrl          = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $script:Agent            = 'codex'
@@ -697,7 +697,7 @@ $AssetDockerfile = @'
 # NOTE: Codex has no auto-updater — version is baked at build time.
 # The launcher rebuilds when a new version ships.
 #
-# Managed by the agent-sandbox installer (v1.3.0). Re-running the
+# Managed by the agent-sandbox installer (v1.3.1). Re-running the
 # installer rewrites this file; local edits are backed up first.
 
 FROM node:24-slim
@@ -764,14 +764,14 @@ ENV PATH=/home/agent/.npm-global/bin:/home/agent/.cargo/bin:/usr/local/cargo/bin
 $AssetLauncher = @'
 # codex-sandbox.ps1 — run Codex CLI sandboxed in the current directory.
 #
-# Installed by the agent-sandbox installer (v1.3.0):
+# Installed by the agent-sandbox installer (v1.3.1):
 #   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.ps1 | iex
 # Edits here are backed up, not preserved, when you upgrade.
 #
 # Autonomy comes from ~/.codex/config.toml inside the container, not a flag.
 $ErrorActionPreference = 'Stop'
 
-$SandboxVersion = '1.3.0'
+$SandboxVersion = '1.3.1'
 $RawBase        = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
 $RepoUrl        = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $Agent          = 'codex'
@@ -1357,7 +1357,7 @@ Invoke-LauncherMain @args
 $AssetShim = @'
 @echo off
 rem Shim so `codex-sandbox` works from cmd.exe and never trips execution policy.
-rem Installed by the agent-sandbox installer (v1.3.0).
+rem Installed by the agent-sandbox installer (v1.3.1).
 setlocal
 set "SANDBOX_PS1=%~dp0codex-sandbox.ps1"
 where pwsh >nul 2>nul
@@ -1371,7 +1371,7 @@ exit /b %ERRORLEVEL%
 $AssetConfigToml = @'
 # Codex autonomy inside the container. The container is the security
 # boundary, so Codex's own OS-level sandbox is turned off and approvals
-# are disabled. Seeded by the agent-sandbox installer (v1.3.0);
+# are disabled. Seeded by the agent-sandbox installer (v1.3.1);
 # your edits here are preserved across upgrades.
 approval_policy = "never"
 sandbox_mode = "danger-full-access"

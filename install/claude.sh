@@ -2,7 +2,7 @@
 #
 #  THIS FILE IS GENERATED — do not edit it directly.
 #  Source: src/, assembled by tools/build.sh. Edit there and rebuild.
-#  Version 1.3.0
+#  Version 1.3.1
 #
 #
 # Claude Code sandbox installer.
@@ -13,7 +13,7 @@
 # image, and the named volumes that hold your login. Re-run it to upgrade.
 set -euo pipefail
 
-INSTALLER_VERSION="1.3.0"
+INSTALLER_VERSION="1.3.1"
 RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
 REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
@@ -1072,7 +1072,7 @@ cat <<'__SANDBOX_ASSET_EOF__'
 # Anything else a project needs gets installed into that project's own
 # directory (./.jdk, ./.bin, etc.) — resist adding it here.
 #
-# Managed by the agent-sandbox installer (v1.3.0). Re-running the
+# Managed by the agent-sandbox installer (v1.3.1). Re-running the
 # installer rewrites this file; local edits are backed up first, but the
 # supported way to customise is to keep your own copy elsewhere and build
 # with --src-dir.
@@ -1163,7 +1163,7 @@ cat <<'__SANDBOX_ASSET_EOF__'
 #!/usr/bin/env bash
 # claude-sandbox — run Claude Code sandboxed in the current directory.
 #
-# Installed by the agent-sandbox installer (v1.3.0):
+# Installed by the agent-sandbox installer (v1.3.1):
 #   curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.sh | bash
 # Edits here are backed up, not preserved, when you upgrade.
 #
@@ -1179,7 +1179,7 @@ IMAGE_BASENAME=claude-sandbox
 LAUNCHER_NAME=claude-sandbox
 
 # --- shared launcher machinery (generated; see https://github.com/mriffle/llm-cli-docker-sandbox) ----------------
-SANDBOX_VERSION="1.3.0"
+SANDBOX_VERSION="1.3.1"
 RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
 REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
@@ -1573,7 +1573,10 @@ resolve_ro_path() {
 # by the launch (which refuses) and by doctor (which reports).
 ro_check_path() {
     local src=$1 home proj
-    home=${HOME:-}
+    # Physical, like src: on macOS $HOME under /var/folders (as in CI) is really
+    # /private/var/folders, and a symlinked home on any host would otherwise
+    # slip past the comparison.
+    home=$(resolve_ro_path "${HOME:-}") || home=''
     proj=$(host_workdir)
     if reserved_container_path "$src"; then
         printf '%s is a system path inside the container' "$src"; return

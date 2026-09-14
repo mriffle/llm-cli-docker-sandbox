@@ -879,9 +879,27 @@ ro_setup() {
 @test "a system path is refused" {
     ro_setup
     : > "$FAKE_DOCKER_LOG"
-    run bash "$LAUNCH" --sandbox-ro /etc
+    # /usr, not /etc: on macOS /etc, /tmp and /var are symlinks into /private,
+    # so they resolve to a path that is not a system one inside the container
+    # (and is mounted there, under its physical name — the same thing that
+    # happens to the project mount).
+    run bash "$LAUNCH" --sandbox-ro /usr
     assert_failure
-    assert_output_contains "/etc is a system path inside the container"
+    assert_output_contains "/usr is a system path inside the container"
+    refute_docker_ran 'docker run'
+}
+
+@test "the home directory is refused even when HOME names it through a symlink" {
+    # What the macOS CI runner does by accident (its temp tree is under
+    # /var/folders, really /private/var/folders), reproduced on purpose: the
+    # mount source is resolved physically, so the home it is compared against
+    # must be too, or the refusal silently stops applying.
+    ro_setup
+    ln -s "$(phys "$TESTDIR")" "$TESTDIR/alias"
+    : > "$FAKE_DOCKER_LOG"
+    HOME="$TESTDIR/alias/home" run bash "$LAUNCH" --sandbox-ro "$(phys "$HOME")"
+    assert_failure
+    assert_output_contains "contains your home directory"
     refute_docker_ran 'docker run'
 }
 

@@ -393,7 +393,10 @@ resolve_ro_path() {
 # by the launch (which refuses) and by doctor (which reports).
 ro_check_path() {
     local src=$1 home proj
-    home=${HOME:-}
+    # Physical, like src: on macOS $HOME under /var/folders (as in CI) is really
+    # /private/var/folders, and a symlinked home on any host would otherwise
+    # slip past the comparison.
+    home=$(resolve_ro_path "${HOME:-}") || home=''
     proj=$(host_workdir)
     if reserved_container_path "$src"; then
         printf '%s is a system path inside the container' "$src"; return

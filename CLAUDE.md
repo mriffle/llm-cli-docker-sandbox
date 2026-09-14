@@ -136,6 +136,13 @@ runs under `pwsh` on the Linux runner.
   same reason the socket path comes from `docker context inspect`, not a hard-coded
   `/var/run/docker.sock`: rootless daemons, Colima and OrbStack all put it
   elsewhere, and a `tcp://` or `ssh://` endpoint has no socket to mount at all.
+- **Compare paths physically, on both sides.** Mount sources are resolved with
+  `pwd -P`, so anything they are compared against must be too. `--sandbox-ro`
+  first checked a resolved source against the raw `$HOME`; on the macOS runner,
+  whose temp tree is `/var/folders` = `/private/var/folders`, the home-directory
+  refusal silently stopped applying. Likewise `/etc`, `/tmp` and `/var` on
+  macOS resolve into `/private`, so a test that expects `/etc` to be treated
+  as a system path passes on Linux and fails there.
 - **One mount point is one project identity.** Both agents key their
   per-project state on the working directory *string* — Claude Code's
   `~/.claude/projects/<cwd-slugified>/` (session transcripts *and* memory), the
