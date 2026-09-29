@@ -107,12 +107,24 @@ RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
 
 @test "the Dockerfiles the installers embed match the ones MANUAL.md documents" {
     # Not byte-identical (the shipped ones carry a managed-by header), but the
-    # build instructions themselves must not drift apart.
+    # build instructions themselves must not drift apart. Every line, not just
+    # each instruction's first: the entrypoint script lives in continuation
+    # lines of a RUN.
     local line
     while IFS= read -r line; do
-        grep -qF "$line" "$REPO_ROOT/MANUAL.md" \
+        grep -qF -- "$line" "$REPO_ROOT/MANUAL.md" \
             || fail_with "MANUAL.md is missing a Dockerfile line the installer ships: $line"
-    done < <(grep -E '^(FROM|RUN|ENV|ARG|USER|WORKDIR|COPY) ' "$REPO_ROOT/src/assets/claude.Dockerfile")
+    done < <(grep -vE '^[[:space:]]*(#|$)' "$REPO_ROOT/src/assets/claude.Dockerfile")
+}
+
+@test "the Claude image installs Claude Code natively, not with npm" {
+    # An npm install updates itself in the image layer, so every update was
+    # lost at the end of the session. Only the native install lives in the
+    # claude-local volume.
+    refute_file_contains "$REPO_ROOT/src/assets/claude.Dockerfile" '@anthropic-ai/claude-code'
+    refute_file_contains "$REPO_ROOT/MANUAL.md" '@anthropic-ai/claude-code'
+    refute_file_contains "$REPO_ROOT/MANUAL.md" 'npm install is only a first-run bootstrap'
+    assert_file_contains "$REPO_ROOT/src/assets/claude.Dockerfile" 'https://claude.ai/install.sh'
 }
 
 @test "the README's security notes describe the socket as it now behaves" {

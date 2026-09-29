@@ -22,7 +22,7 @@ teardown_file() {
     for agent in claude codex; do
         docker image rm -f "$agent-sandbox-$E2E_USER" >/dev/null 2>&1 || true
     done
-    for vol in claude-config claude-local codex-config; do
+    for vol in claude-config claude-local codex-config claude-e2e-fresh claude-e2e-legacy; do
         docker volume rm -f "$vol-$E2E_USER" >/dev/null 2>&1 || true
     done
     rm -rf "$E2E_HOME"
@@ -103,6 +103,47 @@ assert_output_contains() { case "$output" in *"$1"*) return 0 ;; *) fail_with "e
     run docker run --rm "$CLAUDE_IMAGE" claude --version
     assert_success
     assert_output_contains "."
+}
+
+# Self-updates only survive the session when claude runs from ~/.local, the
+# claude-local volume. Until v1.3.2 it was an npm install in the image layer,
+# whose updates were discarded at every exit.
+@test "e2e: a new claude-local volume gets Claude Code from the image, with no download" {
+    local vol="claude-e2e-fresh-$E2E_USER"
+    run docker run --rm -v "$vol:/home/agent/.local" "$CLAUDE_IMAGE" sh -c 'readlink -f "$(command -v claude)"'
+    assert_success
+    case "$output" in /home/agent/.local/share/claude/versions/*) ;;
+        *) fail_with "claude does not run from the volume" ;; esac
+    run docker run --rm -v "$vol:/home/agent/.local" "$CLAUDE_IMAGE" claude --version
+    assert_success
+    case "$output" in *"claude-local volume"*) fail_with "a new volume should need no install" ;; esac
+}
+
+@test "e2e: the entrypoint leaves every command but claude alone" {
+    # An npm-era volume: tools in it, but no Claude Code. docker_socket_gid and
+    # volume_owner_uid run stat and sh in this image, and must not trigger the
+    # one-time install (or its output).
+    local vol="claude-e2e-legacy-$E2E_USER"
+    docker run --rm -v "$vol:/home/agent/.local" "$CLAUDE_IMAGE" \
+        sh -c 'rm -rf ~/.local/bin/claude ~/.local/share/claude && touch ~/.local/bin/uv'
+    run docker run --rm -v "$vol:/home/agent/.local" "$CLAUDE_IMAGE" sh -c 'test ! -e ~/.local/bin/claude && echo untouched'
+    assert_success
+    [ "$output" = "untouched" ] || fail_with "expected only 'untouched'"
+}
+
+@test "e2e: an npm-era claude-local volume gets Claude Code installed into it, once" {
+    local vol="claude-e2e-legacy-$E2E_USER"
+    run docker run --rm -v "$vol:/home/agent/.local" "$CLAUDE_IMAGE" claude --version
+    assert_success
+    assert_output_contains "moving Claude Code into the claude-local volume"
+    assert_output_contains "sandbox: done"
+    # A new container, as the next session is: the install persisted.
+    run docker run --rm -v "$vol:/home/agent/.local" "$CLAUDE_IMAGE" claude --version
+    assert_success
+    case "$output" in *"claude-local volume"*) fail_with "installed again: it did not persist" ;; esac
+    run docker run --rm -v "$vol:/home/agent/.local" "$CLAUDE_IMAGE" sh -c 'readlink -f ~/.local/bin/claude; ls ~/.local/bin'
+    assert_output_contains "/home/agent/.local/share/claude/versions/"
+    assert_output_contains "uv"
 }
 
 @test "e2e: the everyday toolchains are present" {

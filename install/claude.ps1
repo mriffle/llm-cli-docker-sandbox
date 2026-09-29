@@ -2,7 +2,7 @@
 #
 #  THIS FILE IS GENERATED — do not edit it directly.
 #  Source: src/, assembled by tools/build.sh. Edit there and rebuild.
-#  Version 1.3.1
+#  Version 1.3.2
 #
 #
 #   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.ps1 | iex
@@ -26,7 +26,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$script:InstallerVersion = '1.3.1'
+$script:InstallerVersion = '1.3.2'
 $script:RawBase          = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
 $script:RepoUrl          = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $script:Agent            = 'claude'
@@ -698,14 +698,14 @@ $AssetDockerfile = @'
 # Anything else a project needs gets installed into that project's own
 # directory (./.jdk, ./.bin, etc.) — resist adding it here.
 #
-# Managed by the agent-sandbox installer (v1.3.1). Re-running the
+# Managed by the agent-sandbox installer (v1.3.2). Re-running the
 # installer rewrites this file; local edits are backed up first, but the
 # supported way to customise is to keep your own copy elsewhere and build
 # with --src-dir.
 #
-# Claude Code version is NOT managed here: the npm install is only a
-# first-run bootstrap; the auto-updater keeps the real binary current
-# in the per-user claude-local volume (mounted at /home/agent/.local).
+# Claude Code version is NOT managed here: the binary built into the image
+# only seeds the per-user claude-local volume (mounted at /home/agent/.local);
+# the auto-updater keeps it current there, where updates survive the session.
 
 FROM node:24-slim
 
@@ -771,26 +771,65 @@ WORKDIR /workspace
 # (ephemeral) home; the toolchain itself stays read-only in the image.
 ENV CARGO_HOME=/home/agent/.cargo
 
-RUN npm config set prefix /home/agent/.npm-global \
-    && npm install -g @anthropic-ai/claude-code
+# Writable (ephemeral) prefix, so the agent can `npm install -g` a tool.
+RUN npm config set prefix /home/agent/.npm-global
+
+# Claude Code, installed natively into ~/.local — not with npm. An npm install
+# records itself as "global", and its updater then rewrites the npm copy in
+# place, in the image layer, so every update was lost when the session ended.
+# The native install lives in ~/.local, which is the claude-local volume.
+# Downloaded to a file for the same reason as rustup above.
+#
+# The binary is also hard-linked into ~/.claude-seed, outside both volumes
+# (same RUN, so the link costs no space): Docker fills a volume from the image
+# only while it is empty, so a claude-local volume from an npm-era image never
+# gets this ~/.local, and the entrypoint below installs from the seed instead.
+# The config the installer wrote goes, so a new claude-config volume starts empty.
+RUN curl -fsSL --retry 3 --retry-connrefused https://claude.ai/install.sh -o /tmp/claude-install.sh \
+    && bash /tmp/claude-install.sh latest \
+    && rm -f /tmp/claude-install.sh \
+    && mkdir -p /home/agent/.claude-seed \
+    && ln /home/agent/.local/share/claude/versions/* /home/agent/.claude-seed/claude \
+    && rm -rf /home/agent/.claude /home/agent/.claude.json /home/agent/.cache/claude
+
+# Runs before every command, and only ever acts on `claude`. On a claude-local
+# volume with no native install yet it runs `claude install` once (a download
+# of ten seconds or so), which also switches the updater to the volume. If that
+# fails, the seed on PATH runs this session and the next launch tries again.
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'if [ "${1:-}" = claude ] && [ ! -x "$HOME/.local/bin/claude" ]; then' \
+    '    echo "sandbox: moving Claude Code into the claude-local volume (once)..." >&2' \
+    '    if out=$("$HOME/.claude-seed/claude" install 2>&1); then' \
+    '        echo "sandbox: done; Claude Code now updates itself there" >&2' \
+    '    else' \
+    '        printf "%s\n" "$out" >&2' \
+    '        echo "sandbox: that failed; using the built-in Claude Code for now" >&2' \
+    '    fi' \
+    'fi' \
+    'exec "$@"' \
+    > /home/agent/.claude-seed/entrypoint \
+    && chmod 755 /home/agent/.claude-seed/entrypoint
 
 # Pre-create dirs that back named volumes so they're agent-owned on first mount
 RUN mkdir -p /home/agent/.claude /home/agent/.local/bin /home/agent/.local/share \
     /home/agent/.cargo
 
-# Order matters: updater-managed claude (~/.local/bin) shadows the npm bootstrap
-ENV PATH=/home/agent/.local/bin:/home/agent/.npm-global/bin:/home/agent/.cargo/bin:/usr/local/cargo/bin:$PATH
+# Order matters: the volume's self-updating claude (~/.local/bin) shadows the seed
+ENV PATH=/home/agent/.local/bin:/home/agent/.claude-seed:/home/agent/.npm-global/bin:/home/agent/.cargo/bin:/usr/local/cargo/bin:$PATH
 ENV CLAUDE_CONFIG_DIR=/home/agent/.claude
+ENTRYPOINT ["/home/agent/.claude-seed/entrypoint"]
+CMD ["claude"]
 '@
 $AssetLauncher = @'
 # claude-sandbox.ps1 — run Claude Code sandboxed in the current directory.
 #
-# Installed by the agent-sandbox installer (v1.3.1):
+# Installed by the agent-sandbox installer (v1.3.2):
 #   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.ps1 | iex
 # Edits here are backed up, not preserved, when you upgrade.
 $ErrorActionPreference = 'Stop'
 
-$SandboxVersion = '1.3.1'
+$SandboxVersion = '1.3.2'
 $RawBase        = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
 $RepoUrl        = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $Agent          = 'claude'
@@ -1330,7 +1369,7 @@ Invoke-LauncherMain @args
 $AssetShim = @'
 @echo off
 rem Shim so `claude-sandbox` works from cmd.exe and never trips execution policy.
-rem Installed by the agent-sandbox installer (v1.3.1).
+rem Installed by the agent-sandbox installer (v1.3.2).
 setlocal
 set "SANDBOX_PS1=%~dp0claude-sandbox.ps1"
 where pwsh >nul 2>nul

@@ -155,6 +155,19 @@ runs under `pwsh` on the Linux runner.
   reintroduce a constant mount path — and if a guard ever sends a project back
   to `/workspace`, it must say so out loud, because a silent fallback rebuilds
   the collision invisibly.
+- **Claude Code must be installed natively, never with npm.** Until v1.3.2 the
+  image ran `npm install -g`. That copy records `installMethod: "global"`, and
+  its updater rewrites the npm copy in place, in the image layer, so an update
+  worked for one session and was gone at the next `--rm` start. Only the native
+  install lives in `~/.local`, the `claude-local` volume. Moving the image
+  alone is not enough: Docker fills a volume from the image only while it is
+  empty, so existing volumes never see the image's `~/.local`. The entrypoint
+  runs `claude install` from a seed outside the volumes when
+  `~/.local/bin/claude` is missing. It must act only on `claude`, because
+  `docker_socket_gid` and `volume_owner_uid` run other commands in the same
+  image. Also, `autoUpdates: false` in `.claude.json` is harmless once
+  `installMethod` is `native` and `autoUpdatesProtectedForNative` is `true`:
+  that combination only disables the legacy npm updater.
 
 ## Docs
 

@@ -88,7 +88,9 @@ Throughout this README, install commands write to `~/.local/bin`. If you prefer 
 
 ### How updates work
 
-Claude Code has a built-in auto-updater. The image's npm install is only a first-run bootstrap: the updater installs new versions into `~/.local/share/claude`, which is backed by the `claude-local-$USER` volume, and `PATH` prefers the updater-managed binary. You essentially never rebuild the image except to change system packages.
+Claude Code has a built-in auto-updater. The image installs Claude Code natively into `~/.local`, which is backed by the `claude-local-$USER` volume, so the updater's new versions land in `~/.local/share/claude` and survive the session. `PATH` prefers that updater-managed binary. You essentially never rebuild the image except to change system packages.
+
+Before v1.3.2 this image installed Claude Code with npm. That copy updated itself in place, in the image layer, and every update was lost when the container exited. A `claude-local` volume from that time has no Claude Code in it, and Docker only fills a volume from the image while the volume is empty. So the first `claude` run on such a volume installs Claude Code into it once, taking about ten seconds. The image's entrypoint does this, and it prints a line when it does.
 
 ### Image
 
@@ -104,9 +106,10 @@ Create the directory and Dockerfile — `mkdir -p ~/claude-sandbox`, then save t
 #   docker build --build-arg UID=$(id -u) --build-arg GID=$(id -g) \
 #     -t claude-sandbox-$USER ~/claude-sandbox
 #
-# Claude Code version is NOT managed here: the npm install is only a
-# first-run bootstrap; the auto-updater keeps the real binary current
-# in the per-user claude-local volume (mounted at /home/agent/.local).
+# Claude Code version is NOT managed here: the binary built into the image
+# only seeds the per-user claude-local volume (mounted at /home/agent/.local);
+# the auto-updater keeps it current there, where updates survive the session.
+
 
 FROM node:24-slim
 
@@ -170,16 +173,55 @@ WORKDIR /workspace
 # (ephemeral) home; the toolchain itself stays read-only in the image.
 ENV CARGO_HOME=/home/agent/.cargo
 
-RUN npm config set prefix /home/agent/.npm-global \
-    && npm install -g @anthropic-ai/claude-code
+# Writable (ephemeral) prefix, so the agent can `npm install -g` a tool.
+RUN npm config set prefix /home/agent/.npm-global
+
+# Claude Code, installed natively into ~/.local — not with npm. An npm install
+# records itself as "global", and its updater then rewrites the npm copy in
+# place, in the image layer, so every update was lost when the session ended.
+# The native install lives in ~/.local, which is the claude-local volume.
+# Downloaded to a file for the same reason as rustup above.
+#
+# The binary is also hard-linked into ~/.claude-seed, outside both volumes
+# (same RUN, so the link costs no space): Docker fills a volume from the image
+# only while it is empty, so a claude-local volume from an npm-era image never
+# gets this ~/.local, and the entrypoint below installs from the seed instead.
+# The config the installer wrote goes, so a new claude-config volume starts empty.
+RUN curl -fsSL --retry 3 --retry-connrefused https://claude.ai/install.sh -o /tmp/claude-install.sh \
+    && bash /tmp/claude-install.sh latest \
+    && rm -f /tmp/claude-install.sh \
+    && mkdir -p /home/agent/.claude-seed \
+    && ln /home/agent/.local/share/claude/versions/* /home/agent/.claude-seed/claude \
+    && rm -rf /home/agent/.claude /home/agent/.claude.json /home/agent/.cache/claude
+
+# Runs before every command, and only ever acts on `claude`. On a claude-local
+# volume with no native install yet it runs `claude install` once (a download
+# of ten seconds or so), which also switches the updater to the volume. If that
+# fails, the seed on PATH runs this session and the next launch tries again.
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'if [ "${1:-}" = claude ] && [ ! -x "$HOME/.local/bin/claude" ]; then' \
+    '    echo "sandbox: moving Claude Code into the claude-local volume (once)..." >&2' \
+    '    if out=$("$HOME/.claude-seed/claude" install 2>&1); then' \
+    '        echo "sandbox: done; Claude Code now updates itself there" >&2' \
+    '    else' \
+    '        printf "%s\n" "$out" >&2' \
+    '        echo "sandbox: that failed; using the built-in Claude Code for now" >&2' \
+    '    fi' \
+    'fi' \
+    'exec "$@"' \
+    > /home/agent/.claude-seed/entrypoint \
+    && chmod 755 /home/agent/.claude-seed/entrypoint
 
 # Pre-create dirs that back named volumes so they're agent-owned on first mount
 RUN mkdir -p /home/agent/.claude /home/agent/.local/bin /home/agent/.local/share \
     /home/agent/.cargo
 
-# Order matters: updater-managed claude (~/.local/bin) shadows the npm bootstrap
-ENV PATH=/home/agent/.local/bin:/home/agent/.npm-global/bin:/home/agent/.cargo/bin:/usr/local/cargo/bin:$PATH
+# Order matters: the volume's self-updating claude (~/.local/bin) shadows the seed
+ENV PATH=/home/agent/.local/bin:/home/agent/.claude-seed:/home/agent/.npm-global/bin:/home/agent/.cargo/bin:/usr/local/cargo/bin:$PATH
 ENV CLAUDE_CONFIG_DIR=/home/agent/.claude
+ENTRYPOINT ["/home/agent/.claude-seed/entrypoint"]
+CMD ["claude"]
 ```
 
 ### Launcher

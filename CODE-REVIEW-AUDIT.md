@@ -840,6 +840,9 @@ needs.
   codex).
 - Fix: `npm cache clean --force` (or `rm -rf ~/.npm/_cacache`) in the same
   `RUN`; update MANUAL.md's Dockerfiles in the same commit.
+- v1.3.2: the Claude half is gone. That image now installs Claude Code
+  natively instead of with npm, so only `codex.Dockerfile` still carries the
+  cache.
 
 ### A20. `tests/helper.bash:90` `local` expansion-order bug; helper not linted
 

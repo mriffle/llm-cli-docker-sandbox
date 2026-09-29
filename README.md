@@ -240,7 +240,7 @@ claude-sandbox --sandbox-doctor         # what's installed, and is it current?
 
 Once a day, at most, a launcher checks whether a newer sandbox has been published and prints a one-line note if so. It has a two-second ceiling, is silent when offline, and never blocks a launch. Turn it off with `SANDBOX_NO_UPDATE_CHECK=1`.
 
-Claude Code itself doesn't need any of this — it self-updates inside the container, into a volume that survives rebuilds. Codex has no updater, so its launcher checks the npm registry and rebuilds when a new release ships (a no-op when you're current).
+Claude Code itself doesn't need any of this — it self-updates inside the container, into a volume that survives rebuilds. (Before v1.3.2 those updates were silently lost at session exit. The first launch after upgrading moves Claude Code into the volume once, and says so.) Codex has no updater, so its launcher checks the npm registry and rebuilds when a new release ships (a no-op when you're current).
 
 If you've edited an installed file yourself, an upgrade backs your version up to `<file>.bak.<timestamp>` before replacing it, and says so. A Codex `config.toml` you've changed is left alone entirely.
 
