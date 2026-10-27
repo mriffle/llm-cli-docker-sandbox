@@ -620,7 +620,7 @@ ps_ro_setup() {
     grep -qxF -- 'C:\Users\mike\proj\fixtures:/mnt/c/Users/mike/proj/fixtures:ro' "$FAKE_DOCKER_ARGV"
 }
 
-@test "ps launcher: --sandbox-ro refuses a missing path, home, the project, and their ancestors" {
+@test "ps launcher: --sandbox-ro refuses a missing path, home and its ancestors, and the project" {
     ps_ro_setup
     : > "$FAKE_DOCKER_LOG"
     run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro "$TESTDIR/nope"
@@ -632,14 +632,35 @@ ps_ro_setup() {
     run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro .
     assert_failure
     assert_output_contains "is the project, which is already mounted writable"
-    SANDBOX_FAKE_RO_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' SANDBOX_FAKE_HOME='D:\elsewhere' \
-        run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro 'C:\Users\mike'
-    assert_failure
-    assert_output_contains "contains the project, which is mounted writable"
     run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro /etc
     assert_failure
     assert_output_contains "is a system path inside the container"
     refute_docker_ran 'docker run'
+}
+
+@test "ps launcher: a directory containing the project is mounted, with a warning" {
+    ps_ro_setup
+    SANDBOX_FAKE_RO_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' SANDBOX_FAKE_HOME='D:\elsewhere' \
+        run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro 'C:\Users\mike'
+    assert_success
+    grep -qxF -- 'C:\Users\mike:/mnt/c/Users/mike:ro' "$FAKE_DOCKER_ARGV"
+    grep -qxF -- 'C:\Users\mike\proj:/mnt/c/Users/mike/proj' "$FAKE_DOCKER_ARGV"
+    assert_output_contains 'warning: C:\Users\mike contains the project, which stays writable;'
+    assert_output_contains "other projects included, is readable by the agent"
+    # Under SANDBOX_WORKDIR the project's own path shows through read-only.
+    SANDBOX_FAKE_RO_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' SANDBOX_FAKE_HOME='D:\elsewhere' \
+        SANDBOX_WORKDIR=/workspace run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro 'C:\Users\mike'
+    assert_success
+    assert_output_contains "which is writable only at /workspace;"
+    # A shared prefix is not containment.
+    SANDBOX_FAKE_RO_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' SANDBOX_FAKE_HOME='D:\elsewhere' \
+        run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro 'C:\Users\mike\proj-data'
+    assert_success
+    refute_output_contains "contains the project"
+    SANDBOX_FAKE_RO_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' SANDBOX_FAKE_HOME='D:\elsewhere' \
+        run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro 'C:\Users\mike' --sandbox-doctor
+    assert_success
+    assert_output_contains 'read-only mount     C:\Users\mike -> /mnt/c/Users/mike (contains the project, which stays writable)'
 }
 
 @test "ps launcher: --sandbox-ro without a path is refused, and past first position it is forwarded" {

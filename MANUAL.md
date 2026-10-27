@@ -299,7 +299,7 @@ Notes:
   #   -v /data/genome:/data/genome:ro \
   ```
 
-  Mirroring the host path keeps absolute symlinks inside the data working and makes the paths the agent prints resolve on the host. Read-only is not confidentiality — the agent can still read and, with open egress, exfiltrate whatever you mount — so never mount your home directory this way. The installed launcher does this behind `--sandbox-ro`, and refuses the home directory, the project's ancestors, system paths and paths that do not exist.
+  Mirroring the host path keeps absolute symlinks inside the data working and makes the paths the agent prints resolve on the host. Read-only is not confidentiality — the agent can still read and, with open egress, exfiltrate whatever you mount — so never mount your home directory this way. The installed launcher does this behind `--sandbox-ro`, and refuses the home directory and its ancestors, the project itself, system paths and paths that do not exist. A directory containing the project is allowed, with a warning: Docker applies the project's deeper, writable mount on top, so the project stays writable while everything else under that directory becomes readable.
 - No resource limits are set. If runaway sessions on a shared box ever become a problem, add `--memory`, `--cpus`, and `--pids-limit` here.
 
 ### Setup (per user)

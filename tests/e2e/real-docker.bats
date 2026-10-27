@@ -422,6 +422,24 @@ e2e_sock_gid() {
     [ "$(cat "$proj/proof.txt")" = "written-by-agent" ]
 }
 
+@test "e2e: under a read-only parent the project stays writable, and its siblings do not" {
+    # The launcher allows a --sandbox-ro path that contains the project. The
+    # parent is given first on purpose: docker must order mounts by depth, not
+    # by argv, or the project would end up read-only under it.
+    local tree="$BATS_TEST_TMPDIR/ro tree"
+    local proj="$tree/proj" sib="$tree/sibling"
+    mkdir -p "$proj" "$sib"
+    echo sibling-on-the-host > "$sib/in.txt"
+    run docker run --rm -v "$tree:$tree:ro" -v "$proj:$proj" -w "$proj" \
+        --cap-drop=ALL --security-opt=no-new-privileges "$CLAUDE_IMAGE" \
+        sh -c 'cat "$1/in.txt"; touch "$1/out.txt" 2>&1; echo written-by-agent > proof.txt' sh "$sib"
+    assert_success
+    assert_output_contains "sibling-on-the-host"
+    assert_output_contains "Read-only file system"
+    [ ! -e "$sib/out.txt" ] || fail_with "the read-only parent took a write"
+    [ "$(cat "$proj/proof.txt")" = "written-by-agent" ]
+}
+
 @test "e2e: --sandbox-doctor reports a read-only mount as it would be made" {
     local data="$BATS_TEST_TMPDIR/doctor data"
     mkdir -p "$data"

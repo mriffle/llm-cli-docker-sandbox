@@ -364,7 +364,8 @@ docker_sock_args() {
 # project is mirrored: absolute symlinks inside the data resolve, paths the
 # agent prints resolve on the host, and a sibling container started through
 # --sandbox-docker can name the same path. Write access stays exactly the
-# project.
+# project, even under a read-only parent of it: docker applies the deeper mount
+# on top of the shallower one, whatever order they are given in.
 #
 # Read-only is not confidentiality. Egress is open, so anything mounted can be
 # read and shipped by a prompt-injected session. That is why the home
@@ -407,15 +408,39 @@ ro_check_path() {
         esac
     fi
     # host_workdir, not container_workdir: SANDBOX_WORKDIR moves the project's
-    # mount point, not the directory that is mounted writable.
+    # mount point, not the directory that is mounted writable. A directory
+    # *containing* the project is allowed — docker applies the deeper, writable
+    # mount on top — but ro_note_path makes sure it is said out loud.
+    if [ "$proj" = "$src" ]; then
+        printf '%s is the project, which is already mounted writable' "$src"
+    fi
+}
+
+# What deserves attention about a path that will be mounted, or nothing. Shared
+# by the launch (which warns) and by doctor (which reports). A read-only parent
+# of the project leaves a writable hole where the project is, and hands the
+# agent every sibling of it, so it is never mounted quietly.
+ro_note_path() {
+    local src=$1 proj dst
+    proj=$(host_workdir)
     case "$proj" in
-        "$src") printf '%s is the project, which is already mounted writable' "$src"; return ;;
-        "$src"/*) printf '%s contains the project, which is mounted writable' "$src"; return ;;
+        "$src"/*) ;;
+        *) return 0 ;;
     esac
+    # Never the /workspace fallback, whose warning would print again: that
+    # happens only for a reserved project path, and every ancestor of one is
+    # reserved too, so ro_check_path has refused it before this is asked.
+    dst=$(container_workdir)
+    if [ "$dst" = "$proj" ]; then
+        printf 'contains the project, which stays writable'
+    else
+        # SANDBOX_WORKDIR: the project's own path now shows through read-only.
+        printf 'contains the project, which is writable only at %s' "$dst"
+    fi
 }
 
 ro_mount_args() {
-    local given src reason seen nl
+    local given src reason note seen nl
     RO_ARGS=()
     RO_FLAGS=()
     seen=''
@@ -432,6 +457,11 @@ ro_mount_args() {
         case "$seen" in *"$nl$src$nl"*) continue ;; esac
         seen="$seen$nl$src$nl"
         lwarn "read-only: $src"
+        note=$(ro_note_path "$src")
+        if [ -n "$note" ]; then
+            lwarn "  warning: $src $note;"
+            lwarn "  everything else under it, other projects included, is readable by the agent"
+        fi
         RO_ARGS+=(-v "$src:$src:ro")
         RO_FLAGS+=("--sandbox-ro=$src")
     done
@@ -526,7 +556,7 @@ tmux_launch() {
 
 # --- doctor ----------------------------------------------------------------
 doctor() {
-    local manifest vol owner latest label_uid name email host sock gid ro src reason
+    local manifest vol owner latest label_uid name email host sock gid ro src reason note
     printf '%s sandbox — doctor\n' "$AGENT_NAME"
     printf '  launcher version    %s (%s)\n' "$SANDBOX_VERSION" "$(launcher_self)"
     printf '  user / uid          %s / %s\n' "$(sandbox_user)" "$(id -u)"
@@ -541,6 +571,11 @@ doctor() {
         reason=$(ro_check_path "$src")
         if [ -n "$reason" ]; then
             printf '  read-only mount     %s REFUSED — %s\n' "$ro" "$reason"
+            continue
+        fi
+        note=$(ro_note_path "$src")
+        if [ -n "$note" ]; then
+            printf '  read-only mount     %s -> %s (%s)\n' "$src" "$src" "$note"
         else
             printf '  read-only mount     %s -> %s\n' "$src" "$src"
         fi
@@ -694,13 +729,14 @@ that only exists inside the container silently mounts as an empty directory.
 
 --sandbox-ro PATH (or --sandbox-ro=PATH) mounts a host directory or file into
 the session read-only, at the same path it has on the host. Repeat it for more.
-Relative paths resolve against the current directory. Write access stays
-exactly the project, so a path that is the project or contains it is refused,
-as is a path that does not exist, a system path, and your home directory or
+Relative paths resolve against the current directory. Refused: a path that
+does not exist, a system path, the project itself, and your home directory or
 anything above it: read-only is not confidentiality, and egress is open. A
-path inside the project works, and pins that part of the project read-only.
-Note that --sandbox-docker bypasses this: a sibling container can mount the
-same path writable.
+path inside the project works, and pins that part of the project read-only. A
+directory containing the project works too, with a warning: the project inside
+it stays writable, and everything else under it becomes readable. Note that
+--sandbox-docker bypasses this: a sibling container can mount the same path
+writable.
 
 The project is mounted inside the container at the same path it has on the
 host, so each project keeps its own agent memory, session history and

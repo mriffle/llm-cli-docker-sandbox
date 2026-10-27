@@ -2,7 +2,7 @@
 #
 #  THIS FILE IS GENERATED — do not edit it directly.
 #  Source: src/, assembled by tools/build.sh. Edit there and rebuild.
-#  Version 1.3.2
+#  Version 1.4.0
 #
 #
 #   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.ps1 | iex
@@ -26,7 +26,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$script:InstallerVersion = '1.3.2'
+$script:InstallerVersion = '1.4.0'
 $script:RawBase          = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
 $script:RepoUrl          = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $script:Agent            = 'codex'
@@ -697,7 +697,7 @@ $AssetDockerfile = @'
 # NOTE: Codex has no auto-updater — version is baked at build time.
 # The launcher rebuilds when a new version ships.
 #
-# Managed by the agent-sandbox installer (v1.3.2). Re-running the
+# Managed by the agent-sandbox installer (v1.4.0). Re-running the
 # installer rewrites this file; local edits are backed up first.
 
 FROM node:24-slim
@@ -764,14 +764,14 @@ ENV PATH=/home/agent/.npm-global/bin:/home/agent/.cargo/bin:/usr/local/cargo/bin
 $AssetLauncher = @'
 # codex-sandbox.ps1 — run Codex CLI sandboxed in the current directory.
 #
-# Installed by the agent-sandbox installer (v1.3.2):
+# Installed by the agent-sandbox installer (v1.4.0):
 #   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.ps1 | iex
 # Edits here are backed up, not preserved, when you upgrade.
 #
 # Autonomy comes from ~/.codex/config.toml inside the container, not a flag.
 $ErrorActionPreference = 'Stop'
 
-$SandboxVersion = '1.3.2'
+$SandboxVersion = '1.4.0'
 $RawBase        = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
 $RepoUrl        = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $Agent          = 'codex'
@@ -1016,8 +1016,9 @@ function Get-GitEnvArgs {
 # The mirror of ro_mount_args in the shell launcher: --sandbox-ro PATH mounts a
 # host directory or file read-only at its own path inside the container, the
 # Windows path translated the way the project's is. Write access stays exactly
-# the project. See that file for why the home directory and the project's
-# ancestors are refused outright: read-only is not confidentiality.
+# the project, even under a read-only parent of it. See that file for why the
+# home directory and its ancestors are refused outright: read-only is not
+# confidentiality.
 $script:ReadOnlyPaths = @()       # as given on the command line, in order
 $script:ReadOnlyMountArgs = @()   # -v src:dst:ro pairs, built by Get-ReadOnlyMountArgs
 
@@ -1046,11 +1047,27 @@ function Get-ReadOnlyMountReason {
         return "$Src contains your home directory, and read-only is not confidentiality"
     }
     # The host working directory, not Get-ContainerWorkdir: SANDBOX_WORKDIR
-    # moves the project's mount point, not the directory mounted writable.
+    # moves the project's mount point, not the directory mounted writable. A
+    # directory *containing* the project is allowed, and Get-ReadOnlyMountNote
+    # makes sure it is said out loud.
     $projC = ConvertTo-ContainerPath (Get-HostWorkdir)
     if ($projC -eq $dst) { return "$Src is the project, which is already mounted writable" }
-    if ($projC -like "$dst/*") { return "$Src contains the project, which is mounted writable" }
     return ''
+}
+
+# What deserves attention about a path that will be mounted, or '' — the mirror
+# of ro_note_path. A read-only parent of the project leaves a writable hole
+# where the project is and hands the agent every sibling of it.
+function Get-ReadOnlyMountNote {
+    param([string]$Src)
+    $dst = ConvertTo-ContainerPath $Src
+    $projC = ConvertTo-ContainerPath (Get-HostWorkdir)
+    if ($projC -notlike "$dst/*") { return '' }
+    # Never the /workspace fallback, whose note would print again: see
+    # ro_note_path for why a refused path never gets this far.
+    $workdir = Get-ContainerWorkdir
+    if ($workdir -eq $projC) { return 'contains the project, which stays writable' }
+    return "contains the project, which is writable only at $workdir"
 }
 
 function Get-ReadOnlyMountArgs {
@@ -1070,6 +1087,11 @@ function Get-ReadOnlyMountArgs {
         if ($seen -contains $dst) { continue }
         $seen += $dst
         Write-Note "read-only: $src"
+        $note = Get-ReadOnlyMountNote $src
+        if ($note) {
+            Write-Note "  warning: $src $note;"
+            Write-Note "  everything else under it, other projects included, is readable by the agent"
+        }
         $roArgs += @('-v', "${src}:${dst}:ro")
     }
     return ,$roArgs
@@ -1106,7 +1128,9 @@ function Show-Doctor {
         $src = Resolve-ReadOnlyPath $given
         if (-not $src) { Write-Host "  read-only mount     $given REFUSED — does not exist"; continue }
         $reason = Get-ReadOnlyMountReason $src
-        if ($reason) { Write-Host "  read-only mount     $given REFUSED — $reason" }
+        if ($reason) { Write-Host "  read-only mount     $given REFUSED — $reason"; continue }
+        $note = Get-ReadOnlyMountNote $src
+        if ($note) { Write-Host "  read-only mount     $src -> $(ConvertTo-ContainerPath $src) ($note)" }
         else { Write-Host "  read-only mount     $src -> $(ConvertTo-ContainerPath $src)" }
     }
 
@@ -1219,11 +1243,12 @@ token's own permissions apply — prefer a fine-grained one.
 --sandbox-ro PATH (or --sandbox-ro=PATH) mounts a host directory or file into
 the session read-only, at the same path it has on the host (C:\data becomes
 /mnt/c/data, like the project). Repeat it for more. Relative paths resolve
-against the current directory. Write access stays exactly the project, so a
-path that is the project or contains it is refused, as is a path that does not
-exist, a system path, and your home directory or anything above it: read-only
-is not confidentiality, and egress is open. A path inside the project works,
-and pins that part of the project read-only.
+against the current directory. Refused: a path that does not exist, a system
+path, the project itself, and your home directory or anything above it:
+read-only is not confidentiality, and egress is open. A path inside the
+project works, and pins that part of the project read-only. A directory
+containing the project works too, with a warning: the project inside it stays
+writable, and everything else under it becomes readable.
 
 There is no --sandbox-tmux on native Windows; for detachable sessions, run
 the sandbox from WSL instead (see WINDOWS.md, Route A). Nor is there a
@@ -1357,7 +1382,7 @@ Invoke-LauncherMain @args
 $AssetShim = @'
 @echo off
 rem Shim so `codex-sandbox` works from cmd.exe and never trips execution policy.
-rem Installed by the agent-sandbox installer (v1.3.2).
+rem Installed by the agent-sandbox installer (v1.4.0).
 setlocal
 set "SANDBOX_PS1=%~dp0codex-sandbox.ps1"
 where pwsh >nul 2>nul
@@ -1371,7 +1396,7 @@ exit /b %ERRORLEVEL%
 $AssetConfigToml = @'
 # Codex autonomy inside the container. The container is the security
 # boundary, so Codex's own OS-level sandbox is turned off and approvals
-# are disabled. Seeded by the agent-sandbox installer (v1.3.2);
+# are disabled. Seeded by the agent-sandbox installer (v1.4.0);
 # your edits here are preserved across upgrades.
 approval_policy = "never"
 sandbox_mode = "danger-full-access"

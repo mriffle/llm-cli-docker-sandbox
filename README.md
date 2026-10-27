@@ -216,11 +216,27 @@ launching.
   confidentiality: egress is open, so a prompt-injected session can read
   `~/.ssh` and ship it just as well as it can read a CSV. Mount data, not
   homes.
-- **The project, or a directory containing it.** The project is already
-  mounted writable, and it stays the only thing that is.
+- **The project itself.** It is already mounted writable, and it stays the
+  only thing that is.
 
 A path *inside* the project is allowed and useful: `--sandbox-ro fixtures`
 pins that directory read-only while the rest of the project stays writable.
+
+A directory *containing* the project is allowed too — `--sandbox-ro ..` from
+`~/dev/thing` to let the agent read the repositories beside it — but it always
+comes with a warning:
+
+```text
+sandbox: read-only: /home/you/dev
+sandbox:   warning: /home/you/dev contains the project, which stays writable;
+sandbox:   everything else under it, other projects included, is readable by the agent
+```
+
+The project inside it stays writable, because Docker lays the deeper mount on
+top of the shallower one, and everything else under it becomes readable —
+including any `.env` file or local credential a sibling repository keeps. With
+`SANDBOX_WORKDIR` set, the project is writable only at that path; its own path
+under the parent shows through read-only, and the warning says so.
 Two things the flag does not do: it grants nothing you could not already read
 (the bind mount keeps host permissions, and the agent runs as your UID), and it
 does not survive `--sandbox-docker` — a sibling container the agent starts can

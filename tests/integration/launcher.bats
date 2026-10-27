@@ -925,17 +925,48 @@ ro_setup() {
     refute_docker_ran 'docker run'
 }
 
-@test "a directory containing the project is refused" {
+@test "a directory containing the project is mounted, and the launch warns about it" {
     ro_setup
     mkdir -p "$TESTDIR/tree/proj"
     cd "$TESTDIR/tree/proj"
-    : > "$FAKE_DOCKER_LOG"
+    local tree proj
+    tree=$(phys "$TESTDIR/tree")
+    proj=$(phys "$TESTDIR/tree/proj")
     # HOME is moved aside so the home rule does not answer first: this is the
     # project rule under test. XDG_* keep the launcher's own state where it was.
     HOME="$TESTDIR/elsewhere" run bash "$LAUNCH" --sandbox-ro ..
-    assert_failure
-    assert_output_contains "contains the project, which is mounted writable"
-    refute_docker_ran 'docker run'
+    assert_success
+    argv_has "$tree:$tree:ro"
+    # The project's own writable mount is still there; docker lays it on top.
+    argv_has "$proj:$proj"
+    assert_output_contains "read-only: $tree"
+    assert_output_contains "warning: $tree contains the project, which stays writable;"
+    assert_output_contains "other projects included, is readable by the agent"
+}
+
+@test "a path beside the project, not above it, gets no warning" {
+    ro_setup
+    run bash "$LAUNCH" --sandbox-ro "$DATA"
+    assert_success
+    refute_output_contains "warning:"
+    # A shared prefix is not containment: /x/proj-data does not hold /x/proj.
+    mkdir -p "$PROJECT-data"
+    run bash "$LAUNCH" --sandbox-ro "$PROJECT-data"
+    assert_success
+    refute_output_contains "contains the project"
+}
+
+@test "under SANDBOX_WORKDIR, a parent of the project says where it is writable" {
+    ro_setup
+    mkdir -p "$TESTDIR/tree/proj"
+    cd "$TESTDIR/tree/proj"
+    local tree; tree=$(phys "$TESTDIR/tree")
+    # The project is mounted at /workspace, so its own path under the parent
+    # shows through read-only; the warning has to say so.
+    HOME="$TESTDIR/elsewhere" SANDBOX_WORKDIR=/workspace run bash "$LAUNCH" --sandbox-ro ..
+    assert_success
+    argv_has "$tree:$tree:ro"
+    assert_output_contains "warning: $tree contains the project, which is writable only at /workspace;"
 }
 
 @test "SANDBOX_WORKDIR does not change which directory counts as the project" {
@@ -1025,6 +1056,16 @@ ro_setup() {
     assert_output_contains ". REFUSED — "
     assert_output_contains "is the project"
     refute_docker_ran 'docker run -it'
+}
+
+@test "--sandbox-doctor notes a read-only mount that contains the project" {
+    ro_setup
+    mkdir -p "$TESTDIR/tree/proj"
+    cd "$TESTDIR/tree/proj"
+    local tree; tree=$(phys "$TESTDIR/tree")
+    HOME="$TESTDIR/elsewhere" run bash "$LAUNCH" --sandbox-ro .. --sandbox-doctor
+    assert_success
+    assert_output_contains "read-only mount     $tree -> $tree (contains the project, which stays writable)"
 }
 
 @test "the codex launcher takes --sandbox-ro too" {
