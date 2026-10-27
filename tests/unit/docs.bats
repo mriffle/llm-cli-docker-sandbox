@@ -195,3 +195,18 @@ RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
     grep -qF -- ':ro' "$REPO_ROOT/MANUAL.md" \
         || fail_with "MANUAL.md does not show the hand-built read-only mount"
 }
+
+@test "the docs document --sandbox-rw, and the paths it refuses, as both launchers implement it" {
+    # From v1.5.0 a launch can mount extra host paths writable. The refusal of
+    # home's dotfiles is the security promise; it must be stated where people
+    # decide whether to use the flag.
+    assert_file_contains "$REPO_ROOT/README.md" '--sandbox-rw'
+    assert_file_contains "$REPO_ROOT/README.md" '~/AppData'
+    assert_file_contains "$REPO_ROOT/MANUAL.md" '--sandbox-rw'
+    assert_file_contains "$REPO_ROOT/WINDOWS.md" '--sandbox-rw'
+    local f
+    for f in claude.sh codex.sh claude.ps1 codex.ps1; do
+        grep -qF -- '--sandbox-rw' "$REPO_ROOT/install/$f" \
+            || fail_with "install/$f never mentions --sandbox-rw"
+    done
+}

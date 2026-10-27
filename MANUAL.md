@@ -38,8 +38,8 @@ plus two Docker images and three named volumes that the launchers create and mai
 
 The installers create the same files, with two additions: a manifest under
 `~/.local/share/agent-sandbox/` recording what was installed, and launchers that
-carry `--sandbox-tmux`, `--sandbox-docker`, `--sandbox-ro`, `--sandbox-doctor`
-and `--sandbox-upgrade`. The hand-built launchers below are the plain versions.
+carry `--sandbox-tmux`, `--sandbox-docker`, `--sandbox-ro`, `--sandbox-rw`,
+`--sandbox-doctor` and `--sandbox-upgrade`. The hand-built launchers below are the plain versions.
 
 These instructions target Linux and macOS hosts. **Windows users:** see
 [WINDOWS.md](WINDOWS.md).
@@ -300,6 +300,14 @@ Notes:
   ```
 
   Mirroring the host path keeps absolute symlinks inside the data working and makes the paths the agent prints resolve on the host. Read-only is not confidentiality — the agent can still read and, with open egress, exfiltrate whatever you mount — so never mount your home directory this way. The installed launcher does this behind `--sandbox-ro`, and refuses the home directory and its ancestors, the project itself, system paths and paths that do not exist. A directory containing the project is allowed, with a warning: Docker applies the project's deeper, writable mount on top, so the project stays writable while everything else under that directory becomes readable.
+- **To let the agent write somewhere besides the project**, drop the `:ro`:
+
+  ```bash
+  # ...add to the docker run above:
+  #   -v /data/results:/data/results \
+  ```
+
+  Never point a writable mount at anything your host executes: `~/.bashrc` and the other dotfiles, `~/.local/bin` or any directory on your `PATH`, `~/.config/autostart`, `~/Library/LaunchAgents`, AppData's Startup folder. A prompt-injected session could leave code there that runs outside the container, as you, after it exits. The installed launcher does this behind `--sandbox-rw`, which refuses everything `--sandbox-ro` does plus every hidden entry directly in home, `~/Library` and `~/AppData`.
 - No resource limits are set. If runaway sessions on a shared box ever become a problem, add `--memory`, `--cpus`, and `--pids-limit` here.
 
 ### Setup (per user)

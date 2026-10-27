@@ -90,6 +90,7 @@ Everything else you pass is handed to the agent untouched. The launcher recognis
 | `--sandbox-git` | also forward a git credential, so the agent can push — see [Git](#git) |
 | `--sandbox-docker` | also mount the host Docker socket, so the agent can use Docker — see [Docker](#docker-inside-the-sandbox) |
 | `--sandbox-ro PATH` | also mount a host directory or file read-only; repeatable — see [Sharing read-only data](#sharing-read-only-data) |
+| `--sandbox-rw PATH` | also mount a host directory or file read-write; repeatable — see [Sharing writable directories](#sharing-writable-directories) |
 | `--sandbox-tmux` / `--sandbox-tmux-detached` | run inside a tmux session for this project |
 | `--sandbox-doctor` | report on image, volumes, UIDs, versions — start here when something's wrong |
 | `--sandbox-upgrade` | re-run the installer to update |
@@ -194,7 +195,8 @@ can be repeated:
 claude-sandbox --sandbox-ro ~/data/genome --sandbox-ro=../reference-impl --dangerously-skip-permissions
 ```
 
-Write access stays exactly what it was: the project, and nothing else.
+Write access stays exactly what it was: the project, and nothing else unless
+you also ask for [`--sandbox-rw`](#sharing-writable-directories).
 
 **Where it lands.** At the same path it has on the host, for the same reasons
 [the project does](#why-the-project-keeps-its-own-path-inside-the-container):
@@ -216,8 +218,7 @@ launching.
   confidentiality: egress is open, so a prompt-injected session can read
   `~/.ssh` and ship it just as well as it can read a CSV. Mount data, not
   homes.
-- **The project itself.** It is already mounted writable, and it stays the
-  only thing that is.
+- **The project itself.** It is already mounted writable.
 
 A path *inside* the project is allowed and useful: `--sandbox-ro fixtures`
 pins that directory read-only while the rest of the project stays writable.
@@ -242,6 +243,51 @@ Two things the flag does not do: it grants nothing you could not already read
 does not survive `--sandbox-docker` — a sibling container the agent starts can
 mount the same path writable, which is one more reason that flag is a
 deliberate opt-in.
+
+## Sharing writable directories
+
+When the agent has to produce something outside the project — results into a
+shared output directory, a change across a sibling repository — `--sandbox-rw`
+mounts a host directory (or a single file) into the session **read-write**:
+
+```bash
+claude-sandbox --sandbox-rw /data/results --sandbox-ro /data/raw --dangerously-skip-permissions
+```
+
+It works exactly like [`--sandbox-ro`](#sharing-read-only-data) — same path
+inside and out, one `read-write: …` line per mount at launch, a line in
+`--sandbox-doctor` — and refuses everything that flag refuses. It refuses one
+thing more, because a writable mount can do what a read-only one cannot: plant
+code your host runs later.
+
+- **Every hidden entry directly in your home, and everything under it**
+  (`~/.bashrc`, `~/.profile`, `~/.ssh`, `~/.config`, `~/.local`, …), plus
+  **`~/Library`** and **`~/AppData`**. Your shell runs `~/.bashrc` at every
+  login, `~/.local/bin` is on your `PATH`, `~/.config/autostart`,
+  `~/Library/LaunchAgents` and AppData's Startup folder start programs when you
+  log in. A writable mount of any of them lets a prompt-injected session put
+  something there that runs *outside* the sandbox, as you, after it has exited.
+  A symlink with an innocent name is resolved first, so it is no way around
+  this. Ordinary directories under home (`~/data`, `~/dev/other-repo`) are
+  fine.
+
+Two rules apply across both flags. A path given to both `--sandbox-ro` and
+`--sandbox-rw` is refused rather than settled by whichever mount Docker
+applies last. And mounts nest either way round:
+`--sandbox-rw /data --sandbox-ro /data/raw` leaves `/data/raw` read-only
+inside a writable `/data`.
+
+A directory *containing* the project is allowed, with a warning that
+everything under it — other repositories included — is writable by the agent.
+
+The dotfile rule cannot see everything your host executes. A dotfiles
+repository that `~/.bashrc` symlinks into, a directory on your `PATH` outside
+home, or another repository's `.git/hooks` are all just as dangerous to make
+writable, and look like ordinary directories. The same holds for the project
+itself; `--sandbox-rw` extends that trust to each path you name, so name only
+directories you would let the agent modify unsupervised. As with
+`--sandbox-ro`, the mount grants nothing you could not already write (the agent
+runs as your UID), and `--sandbox-docker` bypasses all of it.
 
 ## Upgrading
 
@@ -302,6 +348,7 @@ Nothing outside these paths is touched, except one guarded two-line block append
 | git identity (and, with `--sandbox-git`, a credential) | environment only | that session — never written to a volume or a file |
 | `/var/run/docker.sock`, only with `--sandbox-docker` | bind mount of the host socket | that session — see [Docker inside the sandbox](#docker-inside-the-sandbox) |
 | each `--sandbox-ro` path, at its own path | read-only bind mount | that session — the agent can read it, never write it |
+| each `--sandbox-rw` path, at its own path | bind mount | its changes are permanent, like the project's |
 | everything else (`~/.cargo`, `~/.npm-global`, …) | container layer | discarded at session exit |
 
 Plugins installed via `/plugin install` live in the config volume, so they persist and are shared across all of that user's projects.
@@ -367,7 +414,7 @@ If something looks wrong, `claude-sandbox --sandbox-doctor` (or `codex-sandbox -
 ## Security notes
 
 - **The container is the entire boundary.** In bypass/yolo mode, a prompt-injected or misbehaving session can do anything *inside* it: modify the mounted project, read the agent credentials in its volume, and reach the open network. Only run against repositories you trust.
-- **Never mount host secrets** (`~/.ssh`, cloud credential files, `~/.gitconfig` with tokens) into the container. The launchers mount no host path but `$PWD` unless you ask: `--sandbox-ro` adds paths read-only, and `--sandbox-docker` adds the Docker socket. Read-only is not confidentiality — anything mounted can be read and, with open egress, exfiltrated — which is why `--sandbox-ro` refuses your home directory and anything above it outright. Git identity and, with `--sandbox-git`, a git credential are passed as *environment*, resolved on the host, for one session.
+- **Never mount host secrets** (`~/.ssh`, cloud credential files, `~/.gitconfig` with tokens) into the container. The launchers mount no host path but `$PWD` unless you ask: `--sandbox-ro` adds paths read-only, `--sandbox-rw` adds them writable, and `--sandbox-docker` adds the Docker socket. Read-only is not confidentiality — anything mounted can be read and, with open egress, exfiltrated — which is why both mount flags refuse your home directory and anything above it outright, and `--sandbox-rw` also refuses the dotfiles, `~/Library` and `~/AppData` your host runs code from. Git identity and, with `--sandbox-git`, a git credential are passed as *environment*, resolved on the host, for one session.
 - **A forwarded git credential is a real grant.** `--sandbox-git` is opt-in per launch for that reason. It is scoped to the origin remote's host, but within that host the token's own permissions apply, and an autonomous session that is prompt-injected can use it or exfiltrate it (egress is open — see below). Prefer a fine-grained, revocable token over one with broad `repo` scope, and leave the flag off when the agent has no reason to push. Identity alone (the default) carries no secret.
 - **Egress is unrestricted by default** in these launchers. For defense against exfiltration, adapt the default-deny firewall from Anthropic's [reference devcontainer](https://github.com/anthropics/claude-code/tree/main/.devcontainer) (`init-firewall.sh` + `NET_ADMIN`/`NET_RAW` caps) — and be prepared to maintain a domain allowlist for package registries your projects use.
 - **The Docker socket is a conscious opt-in, and it ends the sandbox.** By default no socket is mounted and no privileged flags are passed; the Docker CLI that ships in the image has no daemon to reach. `--sandbox-docker` changes that for one session, and with it an autonomous agent can start a sibling container that mounts any host path — that is a sandbox escape by design, not a bug in it. It escalates nothing you did not already hold (docker access without `sudo` is root-equivalent on a rootful daemon), but it delegates that to a session that can be prompt-injected. Use [rootless Docker](https://docs.docker.com/engine/security/rootless/) if you use the flag routinely, and see [Docker inside the sandbox](#docker-inside-the-sandbox). Mounting the socket `:ro` is not a mitigation — it restricts the mount, not the API.

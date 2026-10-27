@@ -440,6 +440,24 @@ e2e_sock_gid() {
     [ "$(cat "$proj/proof.txt")" = "written-by-agent" ]
 }
 
+@test "e2e: a read-write mount takes a write, owned by the host user, and nests with read-only" {
+    # What --sandbox-rw produces: a plain -v, here with a read-only path pinned
+    # inside it, given first to show the order of the flags does not matter.
+    local data="$BATS_TEST_TMPDIR/rw data"
+    mkdir -p "$data/pinned"
+    run docker run --rm -v "$data/pinned:$data/pinned:ro" -v "$data:$data" \
+        --cap-drop=ALL --security-opt=no-new-privileges "$CLAUDE_IMAGE" \
+        sh -c 'touch "$1/pinned/no.txt" 2>&1; echo written-by-agent > "$1/out.txt"' sh "$data"
+    assert_success
+    assert_output_contains "Read-only file system"
+    [ "$(cat "$data/out.txt")" = "written-by-agent" ]
+    [ ! -e "$data/pinned/no.txt" ] || fail_with "the read-only path inside took a write"
+    local uid
+    uid=$(stat -c %u "$data/out.txt" 2>/dev/null || stat -f %u "$data/out.txt")
+    [ "$uid" = "$(id -u)" ] \
+        || fail_with "the agent's file is not owned by the host user"
+}
+
 @test "e2e: --sandbox-doctor reports a read-only mount as it would be made" {
     local data="$BATS_TEST_TMPDIR/doctor data"
     mkdir -p "$data"

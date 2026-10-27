@@ -1077,3 +1077,185 @@ ro_setup() {
     argv_has "codex-config-testuser:/home/agent/.codex"
     argv_lacks "--sandbox-ro"
 }
+
+# --- --sandbox-rw (read-write host mounts) ----------------------------------
+# The same machinery as --sandbox-ro, writable. What these add is the one rule
+# read-only does not need: the host *runs* some of what is under home, so a
+# writable mount there is a way out of the sandbox, and is refused.
+
+@test "--sandbox-rw mounts the path read-write, at its own path, and says so" {
+    ro_setup
+    run bash "$LAUNCH" --sandbox-rw "$DATA"
+    assert_success
+    argv_has "$DATA:$DATA"
+    argv_lacks "$DATA:$DATA:ro"
+    assert_output_contains "read-write: $DATA"
+    refute_output_contains "warning:"
+    argv_has "--cap-drop=ALL"
+    argv_has "--security-opt=no-new-privileges"
+}
+
+@test "--sandbox-rw=PATH, relative, repeated, and a file" {
+    ro_setup
+    run bash "$LAUNCH" "--sandbox-rw=../shared data" --sandbox-rw "$DATA/in.csv" --sandbox-rw "$DATA/"
+    assert_success
+    argv_has "$DATA/in.csv:$DATA/in.csv"
+    [ "$(grep -cxF -- "$DATA:$DATA" "$FAKE_DOCKER_ARGV")" -eq 1 ] \
+        || fail_with "expected exactly one mount of $DATA"
+    argv_lacks "../shared data"
+}
+
+@test "--sandbox-rw refuses what --sandbox-ro refuses" {
+    ro_setup
+    : > "$FAKE_DOCKER_LOG"
+    run bash "$LAUNCH" --sandbox-rw "$TESTDIR/nope"
+    assert_failure
+    assert_output_contains "--sandbox-rw: $TESTDIR/nope does not exist"
+    run bash "$LAUNCH" --sandbox-rw /usr
+    assert_failure
+    assert_output_contains "/usr is a system path inside the container"
+    run bash "$LAUNCH" --sandbox-rw "$HOME"
+    assert_failure
+    assert_output_contains "contains your home directory, which holds what your host runs at login"
+    run bash "$LAUNCH" --sandbox-rw "$TESTDIR"
+    assert_failure
+    assert_output_contains "contains your home directory"
+    run bash "$LAUNCH" --sandbox-rw .
+    assert_failure
+    assert_output_contains "is the project, which is already mounted writable"
+    refute_docker_ran 'docker run'
+}
+
+@test "--sandbox-rw refuses home's hidden entries, ~/Library and ~/AppData, at any depth" {
+    ro_setup
+    mkdir -p "$HOME/.config/autostart" "$HOME/.local/bin" "$HOME/Library/LaunchAgents" "$HOME/AppData/Roaming"
+    : > "$HOME/.bashrc"
+    : > "$FAKE_DOCKER_LOG"
+    local p
+    for p in .config .config/autostart .local/bin .bashrc Library Library/LaunchAgents AppData AppData/Roaming; do
+        run bash "$LAUNCH" --sandbox-rw "$HOME/$p"
+        assert_failure
+        assert_output_contains "is where your host keeps what it runs at login"
+    done
+    refute_docker_ran 'docker run'
+}
+
+@test "--sandbox-rw sees through a symlink into a hidden home directory" {
+    # Resolved physically, so an innocently named link is no way around it.
+    ro_setup
+    mkdir -p "$HOME/.config"
+    ln -s "$HOME/.config" "$TESTDIR/settings"
+    : > "$FAKE_DOCKER_LOG"
+    run bash "$LAUNCH" --sandbox-rw "$TESTDIR/settings"
+    assert_failure
+    assert_output_contains "is where your host keeps what it runs at login"
+    refute_docker_ran 'docker run'
+}
+
+@test "--sandbox-rw allows ordinary directories under home, hidden names deeper down included" {
+    ro_setup
+    mkdir -p "$HOME/data" "$HOME/dev/other/.cache" "$HOME/Library-notes"
+    local p
+    for p in data dev/other/.cache Library-notes; do
+        run bash "$LAUNCH" --sandbox-rw "$HOME/$p"
+        assert_success
+        argv_has "$(phys "$HOME/$p"):$(phys "$HOME/$p")"
+    done
+}
+
+@test "--sandbox-ro still allows a hidden home directory; only writing is refused" {
+    ro_setup
+    mkdir -p "$HOME/.config/tool"
+    local cfg; cfg=$(phys "$HOME/.config/tool")
+    run bash "$LAUNCH" --sandbox-ro "$cfg"
+    assert_success
+    argv_has "$cfg:$cfg:ro"
+}
+
+@test "a path given to both --sandbox-ro and --sandbox-rw is refused" {
+    ro_setup
+    : > "$FAKE_DOCKER_LOG"
+    run bash "$LAUNCH" --sandbox-ro "$DATA" --sandbox-rw "$DATA/"
+    assert_failure
+    assert_output_contains "--sandbox-rw: $DATA is also given to --sandbox-ro; pick one"
+    refute_docker_ran 'docker run'
+}
+
+@test "read-only and read-write mounts nest either way" {
+    ro_setup
+    mkdir -p "$DATA/out" "$DATA/out/pinned"
+    local out pinned
+    out=$(phys "$DATA/out")
+    pinned=$(phys "$DATA/out/pinned")
+    run bash "$LAUNCH" --sandbox-ro "$DATA" --sandbox-rw "$out" --sandbox-ro "$pinned"
+    assert_success
+    argv_has "$DATA:$DATA:ro"
+    argv_has "$out:$out"
+    argv_has "$pinned:$pinned:ro"
+}
+
+@test "a read-write directory containing the project is mounted, with a warning" {
+    ro_setup
+    mkdir -p "$TESTDIR/tree/proj"
+    cd "$TESTDIR/tree/proj"
+    local tree; tree=$(phys "$TESTDIR/tree")
+    HOME="$TESTDIR/elsewhere" run bash "$LAUNCH" --sandbox-rw ..
+    assert_success
+    argv_has "$tree:$tree"
+    assert_output_contains "read-write: $tree"
+    assert_output_contains "warning: $tree contains the project;"
+    assert_output_contains "everything under it, other projects included, is writable by the agent"
+}
+
+@test "--sandbox-rw is stripped, composes with the other flags, and only counts in first position" {
+    ro_setup
+    run bash "$LAUNCH" --sandbox-git --sandbox-rw "$DATA" --sandbox-docker --dangerously-skip-permissions
+    assert_success
+    argv_has "$DATA:$DATA"
+    argv_has "--dangerously-skip-permissions"
+    argv_lacks "--sandbox-rw"
+    : > "$FAKE_DOCKER_ARGV"
+    run bash "$LAUNCH" --print --sandbox-rw "$DATA"
+    assert_success
+    argv_has "--sandbox-rw"
+    argv_lacks "$DATA:$DATA"
+}
+
+@test "--sandbox-rw without a path is refused" {
+    ro_setup
+    : > "$FAKE_DOCKER_LOG"
+    run bash "$LAUNCH" --sandbox-rw
+    assert_failure
+    assert_output_contains "--sandbox-rw needs a path"
+    refute_docker_ran 'docker run'
+}
+
+@test "--sandbox-rw composes with --sandbox-tmux by re-emitting the resolved flag" {
+    ro_setup
+    run bash "$LAUNCH" --sandbox-rw "../shared data" --sandbox-tmux
+    assert_success
+    tmux_log_has "--sandbox-rw=$(printf '%q' "$DATA")"
+    refute_tmux_log "../shared"
+}
+
+@test "--sandbox-doctor lists read-write mounts, and says why one would be refused" {
+    ro_setup
+    mkdir -p "$HOME/.config"
+    run bash "$LAUNCH" --sandbox-ro "$DATA/in.csv" --sandbox-rw "$DATA" --sandbox-rw "$HOME/.config" --sandbox-doctor
+    assert_success
+    assert_output_contains "read-only mount     $DATA/in.csv -> $DATA/in.csv"
+    assert_output_contains "read-write mount    $DATA -> $DATA"
+    assert_output_contains "read-write mount    $HOME/.config REFUSED — "
+    assert_output_contains "is where your host keeps what it runs at login"
+    refute_docker_ran 'docker run -it'
+}
+
+@test "the codex launcher takes --sandbox-rw too" {
+    bash "$(installer codex)" >/dev/null 2>&1
+    ro_setup
+    FAKE_CODEX_VERSION=1.2.3 run bash "$HOME/.local/bin/codex-sandbox" --sandbox-rw "$DATA"
+    assert_success
+    argv_has "$DATA:$DATA"
+    argv_has "codex-config-testuser:/home/agent/.codex"
+    argv_lacks "--sandbox-rw"
+}

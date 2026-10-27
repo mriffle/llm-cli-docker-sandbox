@@ -2,7 +2,7 @@
 #
 #  THIS FILE IS GENERATED — do not edit it directly.
 #  Source: src/, assembled by tools/build.sh. Edit there and rebuild.
-#  Version 1.4.0
+#  Version 1.5.0
 #
 #
 #   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.ps1 | iex
@@ -26,7 +26,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$script:InstallerVersion = '1.4.0'
+$script:InstallerVersion = '1.5.0'
 $script:RawBase          = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
 $script:RepoUrl          = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $script:Agent            = 'claude'
@@ -698,7 +698,7 @@ $AssetDockerfile = @'
 # Anything else a project needs gets installed into that project's own
 # directory (./.jdk, ./.bin, etc.) — resist adding it here.
 #
-# Managed by the agent-sandbox installer (v1.4.0). Re-running the
+# Managed by the agent-sandbox installer (v1.5.0). Re-running the
 # installer rewrites this file; local edits are backed up first, but the
 # supported way to customise is to keep your own copy elsewhere and build
 # with --src-dir.
@@ -824,12 +824,12 @@ CMD ["claude"]
 $AssetLauncher = @'
 # claude-sandbox.ps1 — run Claude Code sandboxed in the current directory.
 #
-# Installed by the agent-sandbox installer (v1.4.0):
+# Installed by the agent-sandbox installer (v1.5.0):
 #   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.ps1 | iex
 # Edits here are backed up, not preserved, when you upgrade.
 $ErrorActionPreference = 'Stop'
 
-$SandboxVersion = '1.4.0'
+$SandboxVersion = '1.5.0'
 $RawBase        = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
 $RepoUrl        = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $Agent          = 'claude'
@@ -919,7 +919,7 @@ function ConvertTo-ContainerPath {
 # actually named `agent` would otherwise expose in full.
 # True for a container path that must not be mounted over: not absolute, one
 # of the reserved directories, or the agent's own home. Shared by the project
-# mount and by --sandbox-ro.
+# mount and by --sandbox-ro and --sandbox-rw.
 function Test-ReservedContainerPath {
     param([string]$Path)
     $reserved = @('/', '/bin', '/boot', '/dev', '/etc', '/home', '/lib', '/lib32',
@@ -1070,22 +1070,25 @@ function Get-GitEnvArgs {
     return ,$envArgs
 }
 
-# --- read-only host mounts -------------------------------------------------
-# The mirror of ro_mount_args in the shell launcher: --sandbox-ro PATH mounts a
-# host directory or file read-only at its own path inside the container, the
-# Windows path translated the way the project's is. Write access stays exactly
-# the project, even under a read-only parent of it. See that file for why the
-# home directory and its ancestors are refused outright: read-only is not
-# confidentiality.
-$script:ReadOnlyPaths = @()       # as given on the command line, in order
-$script:ReadOnlyMountArgs = @()   # -v src:dst:ro pairs, built by Get-ReadOnlyMountArgs
+# --- extra host mounts -----------------------------------------------------
+# The mirror of host_mount_args in the shell launcher: --sandbox-ro PATH mounts
+# a host directory or file read-only at its own path inside the container, and
+# --sandbox-rw PATH read-write, the Windows path translated the way the
+# project's is. Mounts nest, deeper on top. See that file for why the home
+# directory and its ancestors are refused outright (read-only is not
+# confidentiality), and why --sandbox-rw also refuses home's hidden entries,
+# ~/Library and ~/AppData: AppData holds the Startup folder, among others, so a
+# writable mount there runs the agent's code outside the sandbox at login.
+$script:ReadOnlyPaths = @()       # --sandbox-ro paths as given on the command line, in order
+$script:ReadWritePaths = @()      # --sandbox-rw paths, likewise
+$script:HostMountArgs = @()       # -v src:dst[:ro] pairs, built by Get-HostMountArgs
 
-# The absolute host path, or '' when it is not there. SANDBOX_FAKE_RO_EXISTS is
-# a test seam: the behavioural suite runs under pwsh on Linux, where a Windows
-# path cannot exist, so it takes the path as given.
-function Resolve-ReadOnlyPath {
+# The absolute host path, or '' when it is not there. SANDBOX_FAKE_PATH_EXISTS
+# is a test seam: the behavioural suite runs under pwsh on Linux, where a
+# Windows path cannot exist, so it takes the path as given.
+function Resolve-HostPath {
     param([string]$Path)
-    if ($env:SANDBOX_FAKE_RO_EXISTS) { return $Path }
+    if ($env:SANDBOX_FAKE_PATH_EXISTS) { return $Path }
     if (-not (Test-Path -LiteralPath $Path)) { return '' }
     $p = (Resolve-Path -LiteralPath $Path).ProviderPath
     $p = $p.TrimEnd('\', '/')
@@ -1094,19 +1097,28 @@ function Resolve-ReadOnlyPath {
     return $p
 }
 
-# The reason a resolved path cannot be mounted, or '' when it can. Comparisons
-# are case-insensitive (-eq, -like), which is right for Windows paths.
-function Get-ReadOnlyMountReason {
-    param([string]$Src)
+# The reason a resolved path cannot be mounted in Mode (ro or rw), or '' when it
+# can. Comparisons are case-insensitive (-eq, -like), which is right for
+# Windows paths.
+function Get-HostMountReason {
+    param([string]$Mode, [string]$Src)
     $dst = ConvertTo-ContainerPath $Src
     if (Test-ReservedContainerPath $dst) { return "$Src is a system path inside the container" }
     $homeC = ConvertTo-ContainerPath (Get-SandboxHomeDir)
     if ($homeC -and ($homeC -eq $dst -or $homeC -like "$dst/*")) {
-        return "$Src contains your home directory, and read-only is not confidentiality"
+        if ($Mode -eq 'ro') { return "$Src contains your home directory, and read-only is not confidentiality" }
+        return "$Src contains your home directory, which holds what your host runs at login"
+    }
+    if ($homeC -and $Mode -eq 'rw') {
+        foreach ($pattern in @("$homeC/.*", "$homeC/Library", "$homeC/Library/*", "$homeC/AppData", "$homeC/AppData/*")) {
+            if ($dst -like $pattern) {
+                return "$Src is where your host keeps what it runs at login; writable, it escapes the sandbox"
+            }
+        }
     }
     # The host working directory, not Get-ContainerWorkdir: SANDBOX_WORKDIR
     # moves the project's mount point, not the directory mounted writable. A
-    # directory *containing* the project is allowed, and Get-ReadOnlyMountNote
+    # directory *containing* the project is allowed, and Get-HostMountNote
     # makes sure it is said out loud.
     $projC = ConvertTo-ContainerPath (Get-HostWorkdir)
     if ($projC -eq $dst) { return "$Src is the project, which is already mounted writable" }
@@ -1114,45 +1126,63 @@ function Get-ReadOnlyMountReason {
 }
 
 # What deserves attention about a path that will be mounted, or '' — the mirror
-# of ro_note_path. A read-only parent of the project leaves a writable hole
-# where the project is and hands the agent every sibling of it.
-function Get-ReadOnlyMountNote {
-    param([string]$Src)
+# of host_mount_note. A parent of the project hands the agent every sibling of
+# it, and, read-only, leaves a writable hole where the project is.
+function Get-HostMountNote {
+    param([string]$Mode, [string]$Src)
     $dst = ConvertTo-ContainerPath $Src
     $projC = ConvertTo-ContainerPath (Get-HostWorkdir)
     if ($projC -notlike "$dst/*") { return '' }
+    if ($Mode -eq 'rw') { return 'contains the project' }
     # Never the /workspace fallback, whose note would print again: see
-    # ro_note_path for why a refused path never gets this far.
+    # host_mount_note for why a refused path never gets this far.
     $workdir = Get-ContainerWorkdir
     if ($workdir -eq $projC) { return 'contains the project, which stays writable' }
     return "contains the project, which is writable only at $workdir"
 }
 
-function Get-ReadOnlyMountArgs {
+function Get-HostMountArgs {
     # Always an array, never $null, and never an empty element (see Get-GitEnvArgs).
-    $roArgs = @()
+    $mountArgs = @()
+    # "mode:path" across both modes: a path given twice in one mode is mounted
+    # once, and one given in both is refused rather than settled by whichever
+    # docker happens to apply last.
     $seen = @()
-    foreach ($given in $script:ReadOnlyPaths) {
-        $src = Resolve-ReadOnlyPath $given
-        if (-not $src) {
-            # Refuse rather than let docker create the path on the host as a
-            # directory and mount that.
-            Stop-Launcher "--sandbox-ro: $given does not exist"
+    $modes = @(
+        @{ Mode = 'ro'; Other = 'rw'; Label = 'read-only'; Paths = $script:ReadOnlyPaths },
+        @{ Mode = 'rw'; Other = 'ro'; Label = 'read-write'; Paths = $script:ReadWritePaths }
+    )
+    foreach ($m in $modes) {
+        foreach ($given in $m.Paths) {
+            $src = Resolve-HostPath $given
+            if (-not $src) {
+                # Refuse rather than let docker create the path on the host as a
+                # directory and mount that.
+                Stop-Launcher "--sandbox-$($m.Mode): $given does not exist"
+            }
+            $reason = Get-HostMountReason $m.Mode $src
+            if ($reason) { Stop-Launcher "--sandbox-$($m.Mode): $reason" }
+            $dst = ConvertTo-ContainerPath $src
+            if ($seen -contains "$($m.Mode):$dst") { continue }
+            if ($seen -contains "$($m.Other):$dst") {
+                Stop-Launcher "--sandbox-$($m.Mode): $src is also given to --sandbox-$($m.Other); pick one"
+            }
+            $seen += "$($m.Mode):$dst"
+            Write-Note "$($m.Label): $src"
+            $note = Get-HostMountNote $m.Mode $src
+            if ($note) {
+                Write-Note "  warning: $src $note;"
+                if ($m.Mode -eq 'ro') {
+                    Write-Note "  everything else under it, other projects included, is readable by the agent"
+                } else {
+                    Write-Note "  everything under it, other projects included, is writable by the agent"
+                }
+            }
+            if ($m.Mode -eq 'ro') { $mountArgs += @('-v', "${src}:${dst}:ro") }
+            else { $mountArgs += @('-v', "${src}:${dst}") }
         }
-        $reason = Get-ReadOnlyMountReason $src
-        if ($reason) { Stop-Launcher "--sandbox-ro: $reason" }
-        $dst = ConvertTo-ContainerPath $src
-        if ($seen -contains $dst) { continue }
-        $seen += $dst
-        Write-Note "read-only: $src"
-        $note = Get-ReadOnlyMountNote $src
-        if ($note) {
-            Write-Note "  warning: $src $note;"
-            Write-Note "  everything else under it, other projects included, is readable by the agent"
-        }
-        $roArgs += @('-v', "${src}:${dst}:ro")
     }
-    return ,$roArgs
+    return ,$mountArgs
 }
 
 function Invoke-Container {
@@ -1164,7 +1194,7 @@ function Invoke-Container {
         '--name', $name,
         '-v', "$(Get-HostWorkdir):$workdir",
         '-w', $workdir
-    ) + $MountArgs + @($script:ReadOnlyMountArgs) + @(Get-GitEnvArgs) + @(
+    ) + $MountArgs + @($script:HostMountArgs) + @(Get-GitEnvArgs) + @(
         '--cap-drop=ALL',
         '--security-opt=no-new-privileges',
         $Image, $AgentBin
@@ -1181,15 +1211,19 @@ function Show-Doctor {
     Write-Host "  launcher version    $SandboxVersion"
     Write-Host "  user                $(Get-User)"
     Write-Host "  project mount       $(Get-HostWorkdir) -> $(Get-ContainerWorkdir)"
-    # What --sandbox-ro would mount, or why it would refuse. Reported, never fatal.
-    foreach ($given in $script:ReadOnlyPaths) {
-        $src = Resolve-ReadOnlyPath $given
-        if (-not $src) { Write-Host "  read-only mount     $given REFUSED — does not exist"; continue }
-        $reason = Get-ReadOnlyMountReason $src
-        if ($reason) { Write-Host "  read-only mount     $given REFUSED — $reason"; continue }
-        $note = Get-ReadOnlyMountNote $src
-        if ($note) { Write-Host "  read-only mount     $src -> $(ConvertTo-ContainerPath $src) ($note)" }
-        else { Write-Host "  read-only mount     $src -> $(ConvertTo-ContainerPath $src)" }
+    # What --sandbox-ro or --sandbox-rw would mount, or why it would refuse.
+    # Reported, never fatal.
+    foreach ($m in @(@{ Mode = 'ro'; Label = 'read-only mount '; Paths = $script:ReadOnlyPaths },
+                     @{ Mode = 'rw'; Label = 'read-write mount'; Paths = $script:ReadWritePaths })) {
+        foreach ($given in $m.Paths) {
+            $src = Resolve-HostPath $given
+            if (-not $src) { Write-Host "  $($m.Label)    $given REFUSED — does not exist"; continue }
+            $reason = Get-HostMountReason $m.Mode $src
+            if ($reason) { Write-Host "  $($m.Label)    $given REFUSED — $reason"; continue }
+            $note = Get-HostMountNote $m.Mode $src
+            if ($note) { Write-Host "  $($m.Label)    $src -> $(ConvertTo-ContainerPath $src) ($note)" }
+            else { Write-Host "  $($m.Label)    $src -> $(ConvertTo-ContainerPath $src)" }
+        }
     }
 
     if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -1288,6 +1322,7 @@ which are only recognised in first position:
 
   --sandbox-git [args...]            also forward a git credential (see below)
   --sandbox-ro PATH [args...]        also mount PATH read-only, repeatable (see below)
+  --sandbox-rw PATH [args...]        also mount PATH read-write, repeatable (see below)
   --sandbox-doctor                   report on image, volumes and versions
   --sandbox-upgrade [installer opts] re-run the installer to update
   --sandbox-version                  print the sandbox version
@@ -1307,6 +1342,14 @@ read-only is not confidentiality, and egress is open. A path inside the
 project works, and pins that part of the project read-only. A directory
 containing the project works too, with a warning: the project inside it stays
 writable, and everything else under it becomes readable.
+
+--sandbox-rw PATH (or --sandbox-rw=PATH) mounts a host directory or file
+read-write, the same way. It refuses everything --sandbox-ro does, and also
+every hidden entry directly in your home (.ssh, .config, ...), ~/Library and
+~/AppData: your host runs code from there at login, so a writable mount would
+let the agent out of the sandbox. A path given to both flags is refused. A
+directory containing the project works, with a warning: everything under it
+becomes writable.
 
 There is no --sandbox-tmux on native Windows; for detachable sessions, run
 the sandbox from WSL instead (see WINDOWS.md, Route A). Nor is there a
@@ -1336,6 +1379,7 @@ function Invoke-LauncherMain {
     # is not one of them, and everything after reaches the agent untouched.
     $script:SandboxGit = [bool]$env:SANDBOX_GIT
     $script:ReadOnlyPaths = @()
+    $script:ReadWritePaths = @()
     while ($rest.Count -gt 0) {
         $a = $rest[0]
         if ($a -eq '--sandbox-git') {
@@ -1347,6 +1391,13 @@ function Invoke-LauncherMain {
             $rest = @($rest | Select-Object -Skip 2)
         } elseif ($a -like '--sandbox-ro=*') {
             $script:ReadOnlyPaths += $a.Substring(13)
+            $rest = @($rest | Select-Object -Skip 1)
+        } elseif ($a -eq '--sandbox-rw') {
+            if ($rest.Count -lt 2) { Stop-Launcher "--sandbox-rw needs a path" }
+            $script:ReadWritePaths += $rest[1]
+            $rest = @($rest | Select-Object -Skip 2)
+        } elseif ($a -like '--sandbox-rw=*') {
+            $script:ReadWritePaths += $a.Substring(13)
             $rest = @($rest | Select-Object -Skip 1)
         } elseif ($a -eq '--sandbox-docker') {
             # There is no Docker-out-of-Docker on this route. Docker Desktop's
@@ -1376,7 +1427,7 @@ function Invoke-LauncherMain {
     }
     # Resolve and refuse before anything slow or stateful (the image check, a
     # Codex rebuild): a bad path should fail at the prompt.
-    $script:ReadOnlyMountArgs = @(Get-ReadOnlyMountArgs)
+    $script:HostMountArgs = @(Get-HostMountArgs)
     Assert-DockerAndImage
     Test-SandboxUpdate
     Invoke-PreRun
@@ -1394,7 +1445,7 @@ Invoke-LauncherMain @args
 $AssetShim = @'
 @echo off
 rem Shim so `claude-sandbox` works from cmd.exe and never trips execution policy.
-rem Installed by the agent-sandbox installer (v1.4.0).
+rem Installed by the agent-sandbox installer (v1.5.0).
 setlocal
 set "SANDBOX_PS1=%~dp0claude-sandbox.ps1"
 where pwsh >nul 2>nul

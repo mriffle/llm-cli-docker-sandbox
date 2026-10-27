@@ -574,7 +574,7 @@ ps_argv_lacks() {
 # --- --sandbox-ro (read-only host mounts) -----------------------------------
 # The mirror of the shell launcher's flag. This job runs under pwsh on Linux,
 # so the host paths are POSIX; the Windows-path translation is driven through
-# SANDBOX_FAKE_PWD plus the SANDBOX_FAKE_RO_EXISTS seam, since C:\ cannot exist
+# SANDBOX_FAKE_PWD plus the SANDBOX_FAKE_PATH_EXISTS seam, since C:\ cannot exist
 # here.
 
 ps_ro_setup() {
@@ -611,7 +611,7 @@ ps_ro_setup() {
 
 @test "ps launcher: a Windows path is mounted at its /mnt/<drive> translation" {
     ps_ro_setup
-    SANDBOX_FAKE_RO_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' \
+    SANDBOX_FAKE_PATH_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' \
         run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro 'D:\data' --sandbox-ro 'C:\Users\mike\proj\fixtures'
     assert_success
     # The source keeps its native form, which is what Docker Desktop expects;
@@ -640,7 +640,7 @@ ps_ro_setup() {
 
 @test "ps launcher: a directory containing the project is mounted, with a warning" {
     ps_ro_setup
-    SANDBOX_FAKE_RO_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' SANDBOX_FAKE_HOME='D:\elsewhere' \
+    SANDBOX_FAKE_PATH_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' SANDBOX_FAKE_HOME='D:\elsewhere' \
         run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro 'C:\Users\mike'
     assert_success
     grep -qxF -- 'C:\Users\mike:/mnt/c/Users/mike:ro' "$FAKE_DOCKER_ARGV"
@@ -648,16 +648,16 @@ ps_ro_setup() {
     assert_output_contains 'warning: C:\Users\mike contains the project, which stays writable;'
     assert_output_contains "other projects included, is readable by the agent"
     # Under SANDBOX_WORKDIR the project's own path shows through read-only.
-    SANDBOX_FAKE_RO_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' SANDBOX_FAKE_HOME='D:\elsewhere' \
+    SANDBOX_FAKE_PATH_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' SANDBOX_FAKE_HOME='D:\elsewhere' \
         SANDBOX_WORKDIR=/workspace run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro 'C:\Users\mike'
     assert_success
     assert_output_contains "which is writable only at /workspace;"
     # A shared prefix is not containment.
-    SANDBOX_FAKE_RO_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' SANDBOX_FAKE_HOME='D:\elsewhere' \
+    SANDBOX_FAKE_PATH_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' SANDBOX_FAKE_HOME='D:\elsewhere' \
         run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro 'C:\Users\mike\proj-data'
     assert_success
     refute_output_contains "contains the project"
-    SANDBOX_FAKE_RO_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' SANDBOX_FAKE_HOME='D:\elsewhere' \
+    SANDBOX_FAKE_PATH_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' SANDBOX_FAKE_HOME='D:\elsewhere' \
         run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro 'C:\Users\mike' --sandbox-doctor
     assert_success
     assert_output_contains 'read-only mount     C:\Users\mike -> /mnt/c/Users/mike (contains the project, which stays writable)'
@@ -683,4 +683,59 @@ ps_ro_setup() {
     assert_output_contains "read-only mount     $DATA -> $DATA"
     assert_output_contains "$TESTDIR/nope REFUSED — does not exist"
     refute_docker_ran 'docker run -it'
+}
+
+@test "ps launcher: --sandbox-rw mounts read-write, and refuses what it must" {
+    ps_ro_setup
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-rw "$DATA" "--sandbox-rw=$DATA/in.csv" --dangerously-skip-permissions
+    assert_success
+    grep -qxF -- "$DATA:$DATA" "$FAKE_DOCKER_ARGV"
+    grep -qxF -- "$DATA/in.csv:$DATA/in.csv" "$FAKE_DOCKER_ARGV"
+    assert_output_contains "read-write: $DATA"
+    ps_argv_lacks "--sandbox-rw"
+    ps_argv_lacks ":ro"
+    : > "$FAKE_DOCKER_LOG"
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-rw "$HOME"
+    assert_failure
+    assert_output_contains "contains your home directory, which holds what your host runs at login"
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-rw .
+    assert_failure
+    assert_output_contains "is the project, which is already mounted writable"
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-ro "$DATA" --sandbox-rw "$DATA"
+    assert_failure
+    assert_output_contains "is also given to --sandbox-ro; pick one"
+    run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-rw
+    assert_failure
+    assert_output_contains "--sandbox-rw needs a path"
+    refute_docker_ran 'docker run'
+}
+
+@test "ps launcher: --sandbox-rw refuses home's hidden entries, AppData and Library, any case" {
+    ps_ro_setup
+    local p
+    for p in '.ssh' '.config\autostart' 'AppData' 'appdata\Roaming\Microsoft\Windows\Start Menu\Programs\Startup' 'Library\LaunchAgents'; do
+        SANDBOX_FAKE_PATH_EXISTS=1 SANDBOX_FAKE_PWD='D:\proj' SANDBOX_FAKE_HOME='C:\Users\mike' \
+            run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-rw "C:\\Users\\mike\\$p"
+        assert_failure
+        assert_output_contains "is where your host keeps what it runs at login"
+    done
+    SANDBOX_FAKE_PATH_EXISTS=1 SANDBOX_FAKE_PWD='D:\proj' SANDBOX_FAKE_HOME='C:\Users\mike' \
+        run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-rw 'C:\Users\mike\data'
+    assert_success
+    grep -qxF -- 'C:\Users\mike\data:/mnt/c/Users/mike/data' "$FAKE_DOCKER_ARGV"
+}
+
+@test "ps launcher: a read-write directory containing the project warns, and doctor says so" {
+    ps_ro_setup
+    SANDBOX_FAKE_PATH_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' SANDBOX_FAKE_HOME='D:\elsewhere' \
+        run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-rw 'C:\Users\mike'
+    assert_success
+    grep -qxF -- 'C:\Users\mike:/mnt/c/Users/mike' "$FAKE_DOCKER_ARGV"
+    assert_output_contains 'warning: C:\Users\mike contains the project;'
+    assert_output_contains "everything under it, other projects included, is writable by the agent"
+    SANDBOX_FAKE_PATH_EXISTS=1 SANDBOX_FAKE_PWD='C:\Users\mike\proj' SANDBOX_FAKE_HOME='D:\elsewhere' \
+        run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-rw 'C:\Users\mike' --sandbox-rw 'D:\elsewhere\AppData' --sandbox-doctor
+    assert_success
+    assert_output_contains 'read-write mount    C:\Users\mike -> /mnt/c/Users/mike (contains the project)'
+    assert_output_contains 'read-write mount    D:\elsewhere\AppData REFUSED — '
 }

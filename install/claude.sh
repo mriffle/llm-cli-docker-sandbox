@@ -2,7 +2,7 @@
 #
 #  THIS FILE IS GENERATED — do not edit it directly.
 #  Source: src/, assembled by tools/build.sh. Edit there and rebuild.
-#  Version 1.4.0
+#  Version 1.5.0
 #
 #
 # Claude Code sandbox installer.
@@ -13,7 +13,7 @@
 # image, and the named volumes that hold your login. Re-run it to upgrade.
 set -euo pipefail
 
-INSTALLER_VERSION="1.4.0"
+INSTALLER_VERSION="1.5.0"
 RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
 REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
@@ -1072,7 +1072,7 @@ cat <<'__SANDBOX_ASSET_EOF__'
 # Anything else a project needs gets installed into that project's own
 # directory (./.jdk, ./.bin, etc.) — resist adding it here.
 #
-# Managed by the agent-sandbox installer (v1.4.0). Re-running the
+# Managed by the agent-sandbox installer (v1.5.0). Re-running the
 # installer rewrites this file; local edits are backed up first, but the
 # supported way to customise is to keep your own copy elsewhere and build
 # with --src-dir.
@@ -1202,12 +1202,12 @@ cat <<'__SANDBOX_ASSET_EOF__'
 #!/usr/bin/env bash
 # claude-sandbox — run Claude Code sandboxed in the current directory.
 #
-# Installed by the agent-sandbox installer (v1.4.0):
+# Installed by the agent-sandbox installer (v1.5.0):
 #   curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.sh | bash
 # Edits here are backed up, not preserved, when you upgrade.
 #
-# The only host path the container can write is $PWD; --sandbox-ro adds
-# others, read-only. Auth and the self-updated claude binary live in
+# The only host path the container can write is $PWD, unless you add others
+# with --sandbox-rw; --sandbox-ro adds them read-only. Auth and the self-updated claude binary live in
 # per-user named volumes, so they survive every rebuild.
 set -uo pipefail
 
@@ -1218,7 +1218,7 @@ IMAGE_BASENAME=claude-sandbox
 LAUNCHER_NAME=claude-sandbox
 
 # --- shared launcher machinery (generated; see https://github.com/mriffle/llm-cli-docker-sandbox) ----------------
-SANDBOX_VERSION="1.4.0"
+SANDBOX_VERSION="1.5.0"
 RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
 REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
@@ -1577,27 +1577,35 @@ docker_sock_args() {
     fi
 }
 
-# --- read-only host mounts -------------------------------------------------
+# --- extra host mounts -----------------------------------------------------
 # --sandbox-ro PATH bind-mounts a host directory or file into the session
-# read-only, at the same path it has on the host — for the same reasons the
-# project is mirrored: absolute symlinks inside the data resolve, paths the
-# agent prints resolve on the host, and a sibling container started through
-# --sandbox-docker can name the same path. Write access stays exactly the
-# project, even under a read-only parent of it: docker applies the deeper mount
-# on top of the shallower one, whatever order they are given in.
+# read-only, and --sandbox-rw PATH read-write, at the same path it has on the
+# host — for the same reasons the project is mirrored: absolute symlinks inside
+# the data resolve, paths the agent prints resolve on the host, and a sibling
+# container started through --sandbox-docker can name the same path. Mounts
+# nest freely: docker applies the deeper mount on top of the shallower one,
+# whatever order they are given in, so the project stays writable under a
+# read-only parent and a read-only path pins part of a writable one.
 #
 # Read-only is not confidentiality. Egress is open, so anything mounted can be
 # read and shipped by a prompt-injected session. That is why the home
 # directory and its ancestors are refused outright rather than warned about:
 # they hold ~/.ssh and friends by construction. Mount data, not homes.
-RO_PATHS=()   # as given on the command line, in order
-RO_FLAGS=()   # --sandbox-ro=PATH, resolved, re-emitted into a tmux session
-RO_ARGS=()    # -v src:src:ro pairs; both built by ro_mount_args
+#
+# Read-write is worse in one particular way: the host *runs* some of what is
+# under home. A writable ~/.bashrc, ~/.local/bin, ~/.config/autostart,
+# ~/Library/LaunchAgents or AppData's Startup folder lets the agent plant code
+# that runs outside the sandbox at your next login, so --sandbox-rw also
+# refuses every hidden entry directly in home, ~/Library and ~/AppData.
+RO_PATHS=()           # --sandbox-ro paths as given on the command line, in order
+RW_PATHS=()           # --sandbox-rw paths, likewise
+HOST_MOUNT_FLAGS=()   # --sandbox-ro=PATH / --sandbox-rw=PATH, resolved, re-emitted into a tmux session
+HOST_MOUNT_ARGS=()    # -v src:src[:ro] pairs; both built by host_mount_args
 
 # The physical path, like host_workdir, so one directory reached two ways is
 # one mount. Files are allowed: a single CSV is a fair thing to share. Fails
 # for a path that is not there or cannot be entered.
-resolve_ro_path() {
+resolve_host_path() {
     local p=$1 dir
     if [ -d "$p" ]; then
         (unset CDPATH; cd -- "$p" 2>/dev/null && pwd -P)
@@ -1609,46 +1617,63 @@ resolve_ro_path() {
     fi
 }
 
-# The reason a resolved path cannot be mounted, or nothing when it can. Shared
-# by the launch (which refuses) and by doctor (which reports).
-ro_check_path() {
-    local src=$1 home proj
+# The reason a resolved path cannot be mounted in MODE (ro or rw), or nothing
+# when it can. Shared by the launch (which refuses) and by doctor (which
+# reports).
+host_mount_check() {
+    local mode=$1 src=$2 home proj
     # Physical, like src: on macOS $HOME under /var/folders (as in CI) is really
     # /private/var/folders, and a symlinked home on any host would otherwise
     # slip past the comparison.
-    home=$(resolve_ro_path "${HOME:-}") || home=''
+    home=$(resolve_host_path "${HOME:-}") || home=''
     proj=$(host_workdir)
     if reserved_container_path "$src"; then
         printf '%s is a system path inside the container' "$src"; return
     fi
     if [ -n "$home" ]; then
         case "$home" in
-            "$src"|"$src"/*) printf '%s contains your home directory, and read-only is not confidentiality' "$src"; return ;;
+            "$src"|"$src"/*)
+                if [ "$mode" = ro ]; then
+                    printf '%s contains your home directory, and read-only is not confidentiality' "$src"
+                else
+                    printf '%s contains your home directory, which holds what your host runs at login' "$src"
+                fi
+                return ;;
         esac
+        if [ "$mode" = rw ]; then
+            case "$src" in
+                "$home"/.*|"$home"/Library|"$home"/Library/*|"$home"/AppData|"$home"/AppData/*)
+                    printf '%s is where your host keeps what it runs at login; writable, it escapes the sandbox' "$src"
+                    return ;;
+            esac
+        fi
     fi
     # host_workdir, not container_workdir: SANDBOX_WORKDIR moves the project's
     # mount point, not the directory that is mounted writable. A directory
-    # *containing* the project is allowed — docker applies the deeper, writable
-    # mount on top — but ro_note_path makes sure it is said out loud.
+    # *containing* the project is allowed — docker applies the deeper mount on
+    # top — but host_mount_note makes sure it is said out loud.
     if [ "$proj" = "$src" ]; then
         printf '%s is the project, which is already mounted writable' "$src"
     fi
 }
 
 # What deserves attention about a path that will be mounted, or nothing. Shared
-# by the launch (which warns) and by doctor (which reports). A read-only parent
-# of the project leaves a writable hole where the project is, and hands the
-# agent every sibling of it, so it is never mounted quietly.
-ro_note_path() {
-    local src=$1 proj dst
+# by the launch (which warns) and by doctor (which reports). A parent of the
+# project hands the agent every sibling of it — and, read-only, leaves a
+# writable hole where the project is — so it is never mounted quietly.
+host_mount_note() {
+    local mode=$1 src=$2 proj dst
     proj=$(host_workdir)
     case "$proj" in
         "$src"/*) ;;
         *) return 0 ;;
     esac
+    if [ "$mode" = rw ]; then
+        printf 'contains the project'; return
+    fi
     # Never the /workspace fallback, whose warning would print again: that
     # happens only for a reserved project path, and every ancestor of one is
-    # reserved too, so ro_check_path has refused it before this is asked.
+    # reserved too, so host_mount_check has refused it before this is asked.
     dst=$(container_workdir)
     if [ "$dst" = "$proj" ]; then
         printf 'contains the project, which stays writable'
@@ -1658,32 +1683,55 @@ ro_note_path() {
     fi
 }
 
-ro_mount_args() {
-    local given src reason note seen nl
-    RO_ARGS=()
-    RO_FLAGS=()
-    seen=''
+# Appends MODE's mounts for the paths that follow. HOST_MOUNT_SEEN carries
+# "mode:path" lines across both calls, so a path given twice in one mode is
+# mounted once, and one given in both modes is refused rather than settled by
+# whichever docker happens to apply last.
+HOST_MOUNT_SEEN=''
+add_host_mounts() {
+    local mode=$1 given src reason note other label nl
+    shift
     nl='
 '
-    for given in ${RO_PATHS[@]+"${RO_PATHS[@]}"}; do
-        if ! src=$(resolve_ro_path "$given"); then
+    if [ "$mode" = ro ]; then other=rw; label=read-only; else other=ro; label=read-write; fi
+    for given in "$@"; do
+        if ! src=$(resolve_host_path "$given"); then
             # Refuse rather than let docker create the path on the host as a
             # root-owned directory and mount that.
-            ldie "--sandbox-ro: $given does not exist (or cannot be entered)"
+            ldie "--sandbox-$mode: $given does not exist (or cannot be entered)"
         fi
-        reason=$(ro_check_path "$src")
-        [ -z "$reason" ] || ldie "--sandbox-ro: $reason"
-        case "$seen" in *"$nl$src$nl"*) continue ;; esac
-        seen="$seen$nl$src$nl"
-        lwarn "read-only: $src"
-        note=$(ro_note_path "$src")
+        reason=$(host_mount_check "$mode" "$src")
+        [ -z "$reason" ] || ldie "--sandbox-$mode: $reason"
+        case "$HOST_MOUNT_SEEN" in
+            *"$nl$mode:$src$nl"*) continue ;;
+            *"$nl$other:$src$nl"*) ldie "--sandbox-$mode: $src is also given to --sandbox-$other; pick one" ;;
+        esac
+        HOST_MOUNT_SEEN="$HOST_MOUNT_SEEN$nl$mode:$src$nl"
+        lwarn "$label: $src"
+        note=$(host_mount_note "$mode" "$src")
         if [ -n "$note" ]; then
             lwarn "  warning: $src $note;"
-            lwarn "  everything else under it, other projects included, is readable by the agent"
+            if [ "$mode" = ro ]; then
+                lwarn "  everything else under it, other projects included, is readable by the agent"
+            else
+                lwarn "  everything under it, other projects included, is writable by the agent"
+            fi
         fi
-        RO_ARGS+=(-v "$src:$src:ro")
-        RO_FLAGS+=("--sandbox-ro=$src")
+        if [ "$mode" = ro ]; then
+            HOST_MOUNT_ARGS+=(-v "$src:$src:ro")
+        else
+            HOST_MOUNT_ARGS+=(-v "$src:$src")
+        fi
+        HOST_MOUNT_FLAGS+=("--sandbox-$mode=$src")
     done
+}
+
+host_mount_args() {
+    HOST_MOUNT_ARGS=()
+    HOST_MOUNT_FLAGS=()
+    HOST_MOUNT_SEEN=''
+    add_host_mounts ro ${RO_PATHS[@]+"${RO_PATHS[@]}"}
+    add_host_mounts rw ${RW_PATHS[@]+"${RW_PATHS[@]}"}
 }
 
 run_container() {
@@ -1699,7 +1747,7 @@ run_container() {
         -v "$src:$dst" \
         -w "$dst" \
         "${MOUNT_ARGS[@]}" \
-        ${RO_ARGS[@]+"${RO_ARGS[@]}"} \
+        ${HOST_MOUNT_ARGS[@]+"${HOST_MOUNT_ARGS[@]}"} \
         ${GIT_ENV_ARGS[@]+"${GIT_ENV_ARGS[@]}"} \
         ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} \
         --cap-drop=ALL \
@@ -1755,9 +1803,9 @@ tmux_launch() {
     ensure_docker_and_image
     self=$(launcher_self)
     # %q keeps arguments with spaces intact through tmux's shell — including
-    # the --sandbox-ro=PATH flags, which were consumed before the dispatch and
+    # the --sandbox-ro=PATH and --sandbox-rw=PATH flags, which were consumed before the dispatch and
     # are re-emitted here so the session's own launch sees them again.
-    cmd=$(printf '%q ' "$self" ${RO_FLAGS[@]+"${RO_FLAGS[@]}"} "$@")
+    cmd=$(printf '%q ' "$self" ${HOST_MOUNT_FLAGS[@]+"${HOST_MOUNT_FLAGS[@]}"} "$@")
     # --sandbox-git and --sandbox-docker were consumed too; being booleans,
     # they travel as environment instead.
     cmd="SANDBOX_IN_TMUX=1 ${SANDBOX_GIT:+SANDBOX_GIT=1 }${SANDBOX_DOCKER:+SANDBOX_DOCKER=1 }$cmd; ec=\$?; if [ \$ec -ne 0 ]; then printf 'exited with status %s — press Enter to close\\n' \"\$ec\"; read -r _; fi"
@@ -1774,31 +1822,39 @@ tmux_launch() {
 }
 
 # --- doctor ----------------------------------------------------------------
+# What --sandbox-ro or --sandbox-rw would mount, or why it would refuse.
+# Reported, never fatal: doctor is for finding out.
+doctor_host_mounts() {
+    local mode=$1 given src reason note label
+    shift
+    if [ "$mode" = ro ]; then label='read-only mount '; else label='read-write mount'; fi
+    for given in "$@"; do
+        if ! src=$(resolve_host_path "$given"); then
+            printf '  %s    %s REFUSED — does not exist (or cannot be entered)\n' "$label" "$given"
+            continue
+        fi
+        reason=$(host_mount_check "$mode" "$src")
+        if [ -n "$reason" ]; then
+            printf '  %s    %s REFUSED — %s\n' "$label" "$given" "$reason"
+            continue
+        fi
+        note=$(host_mount_note "$mode" "$src")
+        if [ -n "$note" ]; then
+            printf '  %s    %s -> %s (%s)\n' "$label" "$src" "$src" "$note"
+        else
+            printf '  %s    %s -> %s\n' "$label" "$src" "$src"
+        fi
+    done
+}
+
 doctor() {
-    local manifest vol owner latest label_uid name email host sock gid ro src reason note
+    local manifest vol owner latest label_uid name email host sock gid
     printf '%s sandbox — doctor\n' "$AGENT_NAME"
     printf '  launcher version    %s (%s)\n' "$SANDBOX_VERSION" "$(launcher_self)"
     printf '  user / uid          %s / %s\n' "$(sandbox_user)" "$(id -u)"
     printf '  project mount       %s -> %s\n' "$(host_workdir)" "$(container_workdir)"
-    # What --sandbox-ro would mount, or why it would refuse. Reported, never
-    # fatal: doctor is for finding out.
-    for ro in ${RO_PATHS[@]+"${RO_PATHS[@]}"}; do
-        if ! src=$(resolve_ro_path "$ro"); then
-            printf '  read-only mount     %s REFUSED — does not exist (or cannot be entered)\n' "$ro"
-            continue
-        fi
-        reason=$(ro_check_path "$src")
-        if [ -n "$reason" ]; then
-            printf '  read-only mount     %s REFUSED — %s\n' "$ro" "$reason"
-            continue
-        fi
-        note=$(ro_note_path "$src")
-        if [ -n "$note" ]; then
-            printf '  read-only mount     %s -> %s (%s)\n' "$src" "$src" "$note"
-        else
-            printf '  read-only mount     %s -> %s\n' "$src" "$src"
-        fi
-    done
+    doctor_host_mounts ro ${RO_PATHS[@]+"${RO_PATHS[@]}"}
+    doctor_host_mounts rw ${RW_PATHS[@]+"${RW_PATHS[@]}"}
 
     if ! have docker; then printf '  docker              NOT INSTALLED\n'; return 1; fi
     if ! docker info >/dev/null 2>&1; then printf '  docker              UNREACHABLE\n'; return 1; fi
@@ -1926,6 +1982,7 @@ which are only recognised in first position:
   --sandbox-git [args...]            also forward a git credential (see below)
   --sandbox-docker [args...]         also mount the host Docker socket (see below)
   --sandbox-ro PATH [args...]        also mount PATH read-only, repeatable (see below)
+  --sandbox-rw PATH [args...]        also mount PATH read-write, repeatable (see below)
   --sandbox-tmux [args...]           run inside a tmux session for this project
   --sandbox-tmux-detached [args...]  same, but do not attach
   --sandbox-doctor                   report on image, volumes, UIDs and versions
@@ -1957,6 +2014,14 @@ it stays writable, and everything else under it becomes readable. Note that
 --sandbox-docker bypasses this: a sibling container can mount the same path
 writable.
 
+--sandbox-rw PATH (or --sandbox-rw=PATH) mounts a host directory or file
+read-write, the same way. It refuses everything --sandbox-ro does, and also
+every hidden entry directly in your home (~/.bashrc, ~/.config, ~/.local, ...),
+~/Library and ~/AppData: your host runs code from there at login, so a writable
+mount would let the agent out of the sandbox. A path given to both flags is
+refused. A directory containing the project works, with a warning: everything
+under it becomes writable.
+
 The project is mounted inside the container at the same path it has on the
 host, so each project keeps its own agent memory, session history and
 approvals. SANDBOX_WORKDIR overrides that if you need the old fixed path.
@@ -1985,6 +2050,9 @@ launcher_main() {
             --sandbox-ro)     [ $# -ge 2 ] || ldie "--sandbox-ro needs a path"
                               RO_PATHS+=("$2"); shift 2 ;;
             --sandbox-ro=*)   RO_PATHS+=("${1#*=}"); shift ;;
+            --sandbox-rw)     [ $# -ge 2 ] || ldie "--sandbox-rw needs a path"
+                              RW_PATHS+=("$2"); shift 2 ;;
+            --sandbox-rw=*)   RW_PATHS+=("${1#*=}"); shift ;;
             *) break ;;
         esac
     done
@@ -1995,7 +2063,7 @@ launcher_main() {
     esac
     # Resolve and refuse here, before a tmux session exists: a bad path should
     # fail at the prompt, not inside a pane waiting for Enter.
-    ro_mount_args
+    host_mount_args
     case "${1:-}" in
         --sandbox-upgrade)        shift; do_upgrade "$@"; exit $? ;;
         --sandbox-tmux)           shift; tmux_launch attach "$@"; exit $? ;;
