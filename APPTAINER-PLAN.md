@@ -137,7 +137,7 @@ Docker stays exactly as it is today, apart from the image-layout prep in M0.
   `preflight` ~:609, `docker_check` ~:318).
 - **"Usable" means usable.** A docker CLI without daemon permission counts as
   absent, quietly. Apptainer is usable when all of these hold:
-  - `apptainer` is present, at a version ≥ the minimum (to be set; see §9)
+  - `apptainer` is present, at a version ≥ the minimum (to be set; see §8, item 6)
   - it can run (user namespaces or setuid)
   - for building, it can do `--fakeroot` (subuid, or a fallback mode)
   - Ubuntu's `kernel.apparmor_restrict_unprivileged_userns` is handled
@@ -152,6 +152,46 @@ Docker stays exactly as it is today, apart from the image-layout prep in M0.
   fakeroot build** on `--sandbox-upgrade`. In auto mode, an Apptainer failure is
   a warning. Keep exit codes 10 and 11 for "no runtime usable", so the existing
   preflight tests keep their meaning.
+- **When a runtime is missing or only partly usable:**
+  1. **Neither runtime is usable.**
+     - Exit **10** when neither is installed at all. Exit **11** when at least
+       one is installed but none can be used.
+     - The message covers *both* runtimes:
+       - one line each saying why it's unusable (not installed, no daemon
+         permission, version too old, cannot build, …)
+       - then both remedies: the existing Docker install help
+         (`docker_missing_help` / `docker_unreachable_help`), and an Apptainer
+         route ("ask your administrators for Apptainer ≥ X in unprivileged mode,
+         with a subordinate UID range for your account")
+     - On macOS the Apptainer line says it is Linux and WSL2 only.
+  2. **A runtime asked for by name can't be set up.** If `--runtime docker` or
+     `--runtime apptainer` names a runtime that can't be set up, **fail loudly**:
+     - print that runtime's reason
+     - use the same exit-code rule as above
+     - install nothing for the other runtime
+
+     A build failure for a runtime asked for by name is fatal, as a failed
+     `docker build` is today (exit 1).
+     **`--runtime all`** sets up whatever is usable. It prints one line per
+     skipped runtime saying why, and fails only if none is usable. In auto mode
+     (no flag), an Apptainer failure stays a warning.
+  3. **Apptainer can run containers but cannot build images.** This happens with
+     an older setuid install, no subordinate UID range, or no working fakeroot
+     fallback. Images are built locally (D2), so these users get nothing. **The
+     installer must say so precisely** rather than fail inside `apptainer build`:
+     - what is missing, e.g. "no subordinate UID range for `<user>` in
+       `/etc/subuid`, and the fakeroot fallback is unavailable"
+     - what an administrator would change (e.g. `usermod --add-subuids`, or
+       allowing unprivileged user namespaces)
+
+     Detect this *before* building. How to probe it is open (§8, item 6);
+     candidates are a subuid/libsubid lookup plus `apptainer buildcfg`. When
+     Apptainer was the only candidate, this counts as unusable (exit 11).
+     *Open question for the owner:* a SIF built from the same `.def` is not
+     UID-specific, so an `--import-sif PATH` escape hatch could let these users
+     build on another machine and copy the image in. It would check the
+     sidecar's `def_sha` and refuse if the SIF and its directory are group- or
+     world-writable. It is not part of the plan until the owner decides.
 - **Manifest** (`manifest_write` ~:389) gains:
   - `runtimes=docker apptainer`
   - `default_runtime=` (Docker if it was usable at install time, else Apptainer)
@@ -204,6 +244,21 @@ existing tests.
 - **Never fall back silently.** If Docker is the choice and its daemon is down,
   fail as today rather than switching to Apptainer. Apptainer has separate logins
   and memory.
+- **Point at the other runtime, but never switch to it.** When the chosen
+  runtime is unavailable at launch and the *other* runtime's image exists, the
+  error ends with a hint. For example: "Apptainer is also set up here: rerun with
+  `--sandbox-runtime=apptainer` (it keeps separate logins and memory)." The user
+  still chooses. The same hint goes in `--sandbox-doctor`.
+- **The chosen runtime's image doesn't exist.** This happens, for example, when
+  `--sandbox-runtime=apptainer` is used before Apptainer was ever set up. The
+  launcher stops and prints the install command for *that* runtime, as
+  `ensure_docker_and_image` does today for a missing Docker image
+  (`launcher-common.sh` ~:66):
+  `curl -fsSL <RAW_BASE>/install/claude.sh | bash -s -- --runtime apptainer`.
+  The `--runtime` part matters: without it, the installer on a machine where
+  Docker works would not build the Apptainer image (§5.3). **Never build an
+  image on first launch.** That would be a multi-minute stall at the prompt, and
+  it fails unpredictably where fakeroot is unavailable.
 - Print the runtime whenever it isn't Docker.
 - **Every Docker-only call goes through a dispatcher:**
   - `ensure_docker_and_image` (~:864, and in `tmux_launch` ~:576 and ~:595)
@@ -446,7 +501,20 @@ measured. Check it on a real Apptainer and record the result in this file.
   - If a host-side `stat -c` gets added, extend `check-portability.sh`.
 - **Integration:**
   - The installer with only Apptainer, with both, and with neither.
+  - Neither runtime: exit 10 when neither is installed, 11 when one is installed
+    but unusable. The message names both runtimes and both remedies.
+  - `--runtime apptainer` or `--runtime docker` naming an unusable runtime fails
+    and installs nothing else. `--runtime all` with one unusable runtime sets up
+    the other and names the skipped one.
+  - Apptainer that can run but not build gets the specific "cannot build"
+    explanation, with no `apptainer build` attempted. The fake `apptainer` needs
+    a knob for this.
   - An upgrade on a Docker+Apptainer host must not build a SIF unless asked.
+  - At launch:
+    - A missing image prints the install command with `--runtime <that runtime>`
+      and builds nothing.
+    - An unavailable chosen runtime hints at the other only when the other's
+      image exists, and never switches to it.
   - Launcher argv must contain `--containall`, `--no-eval`, `--no-privs`,
     `--no-mount bind-paths`, `--net --network=none`, sorted binds and the
     read-only `/egress`. The token must be absent from argv and present in the
