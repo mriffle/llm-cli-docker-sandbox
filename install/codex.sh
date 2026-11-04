@@ -2,7 +2,7 @@
 #
 #  THIS FILE IS GENERATED — do not edit it directly.
 #  Source: src/, assembled by tools/build.sh. Edit there and rebuild.
-#  Version 1.5.0
+#  Version 1.5.1
 #
 #
 # Codex CLI sandbox installer.
@@ -13,7 +13,7 @@
 # a per-user image, and the named volume that holds your login. Re-run to upgrade.
 set -euo pipefail
 
-INSTALLER_VERSION="1.5.0"
+INSTALLER_VERSION="1.5.1"
 RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
 REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
@@ -1071,7 +1071,7 @@ cat <<'__SANDBOX_ASSET_EOF__'
 # NOTE: Codex has no auto-updater — version is baked at build time.
 # The launcher rebuilds when a new version ships.
 #
-# Managed by the agent-sandbox installer (v1.5.0). Re-running the
+# Managed by the agent-sandbox installer (v1.5.1). Re-running the
 # installer rewrites this file; local edits are backed up first.
 
 FROM node:24-slim
@@ -1142,7 +1142,7 @@ cat <<'__SANDBOX_ASSET_EOF__'
 #!/usr/bin/env bash
 # codex-sandbox — run Codex CLI sandboxed in the current directory.
 #
-# Installed by the agent-sandbox installer (v1.5.0):
+# Installed by the agent-sandbox installer (v1.5.1):
 #   curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.sh | bash
 # Edits here are backed up, not preserved, when you upgrade.
 #
@@ -1158,7 +1158,7 @@ IMAGE_BASENAME=codex-sandbox
 LAUNCHER_NAME=codex-sandbox
 
 # --- shared launcher machinery (generated; see https://github.com/mriffle/llm-cli-docker-sandbox) ----------------
-SANDBOX_VERSION="1.5.0"
+SANDBOX_VERSION="1.5.1"
 RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
 REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
@@ -1682,7 +1682,13 @@ run_container() {
     docker_sock_args
     # The ${a[@]+"${a[@]}"} form, not a bare "${a[@]}": expanding an *empty*
     # array under `set -u` is fatal on bash 3.2, which is still macOS /bin/bash.
-    exec docker run -it --rm \
+    #
+    # --init puts docker-init (tini) at PID 1. Without it the agent is PID 1,
+    # and every process orphaned inside the container (a backgrounded dev
+    # server, a shell that exits before its child) is reparented to it on
+    # exit. Neither Claude Code nor node reaps children it did not spawn, so
+    # each one stayed a zombie until the session ended.
+    exec docker run -it --rm --init \
         --name "$(container_name)" \
         -v "$src:$dst" \
         -w "$dst" \
@@ -2087,7 +2093,7 @@ __asset_ASSET_CONFIG_TOML() {
 cat <<'__SANDBOX_ASSET_EOF__'
 # Codex autonomy inside the container. The container is the security
 # boundary, so Codex's own OS-level sandbox is turned off and approvals
-# are disabled. Seeded by the agent-sandbox installer (v1.5.0);
+# are disabled. Seeded by the agent-sandbox installer (v1.5.1);
 # your edits here are preserved across upgrades.
 approval_policy = "never"
 sandbox_mode = "danger-full-access"

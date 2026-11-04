@@ -155,6 +155,11 @@ runs under `pwsh` on the Linux runner.
   reintroduce a constant mount path — and if a guard ever sends a project back
   to `/workspace`, it must say so out loud, because a silent fallback rebuilds
   the collision invisibly.
+- **The agent must not be PID 1.** The entrypoint ends in `exec "$@"`, so
+  without `--init` the agent *is* PID 1, and every process orphaned inside the
+  container is reparented to it. Neither Claude Code nor node reaps children
+  it did not spawn, so a long session piled up zombies. Both launchers pass
+  `--init` (docker-init, i.e. tini, at PID 1); the e2e tier checks it reaps.
 - **Claude Code must be installed natively, never with npm.** Until v1.3.2 the
   image ran `npm install -g`. That copy records `installMethod: "global"`, and
   its updater rewrites the npm copy in place, in the image layer, so an update

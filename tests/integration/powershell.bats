@@ -311,6 +311,18 @@ ps_install() {
     grep -qxF -- "--cap-drop=ALL" "$FAKE_DOCKER_ARGV"
 }
 
+@test "ps launcher: the session runs under docker's init, which reaps orphans" {
+    # Without --init the agent is PID 1, and processes orphaned inside the
+    # container stay zombies until the session ends. See launcher.bats.
+    ps_install claude
+    mkdir -p "$TESTDIR/proj"
+    cd "$TESTDIR/proj"
+    : > "$FAKE_DOCKER_ARGV"
+    run "$PWSH" -NoProfile -File "$LAUNCHER"
+    assert_success
+    assert_session_flag "--init" "claude-sandbox-testuser"
+}
+
 # --- one mount point would be one project identity -------------------------
 # The launcher mirrors the host path so each project keeps its own agent memory
 # and session history. A Windows path is not a Linux path, so it is translated

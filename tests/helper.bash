@@ -170,3 +170,21 @@ refute_docker_ran() {
 }
 
 count_docker_calls() { grep -cF -- "$1" "$FAKE_DOCKER_LOG" || true; }
+
+# assert_session_flag FLAG IMAGE — the session's own `docker run -it` in
+# $FAKE_DOCKER_ARGV carries FLAG *before* IMAGE. After the image it would be an
+# argument to the agent, not to docker, so a bare grep for it proves nothing.
+# Every session run in the file must carry it, and there must be at least one.
+assert_session_flag() {
+    awk -v flag="$1" -v img="$2" '
+        /^--- invocation ---$/ { n = 0; main = 0; seen = 0; next }
+        { n++ }
+        n == 1 { first = $0 }
+        n == 2 && first == "run" && $0 == "-it" { main = 1 }
+        main && $0 == flag { seen = 1 }
+        main && $0 == img { runs++; if (!seen) bad = 1; main = 0 }
+        END { exit !(runs > 0 && !bad) }
+    ' "$FAKE_DOCKER_ARGV" \
+        || { printf -- '--- argv ---\n%s\n' "$(cat "$FAKE_DOCKER_ARGV")" >&2
+             fail_with "expected every session docker run to pass $1 before $2"; }
+}

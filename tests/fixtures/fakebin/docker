@@ -182,7 +182,7 @@ run)
             -e|--env)
                 shift
                 case "${1:-}" in WANT_UID=*) want_uid=${1#WANT_UID=} ;; esac ;;
-            --rm|-it|-i|-t) ;;
+            --rm|--init|-it|-i|-t) ;;
             --user) shift ;;
             --entrypoint) shift; rest="$rest --entrypoint" ;;
             --name) shift ;;

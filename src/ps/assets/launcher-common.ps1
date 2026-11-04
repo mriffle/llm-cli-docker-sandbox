@@ -350,8 +350,11 @@ function Invoke-Container {
     param([string[]]$Passthrough)
     $name = "$Agent-$(Get-User)-$(Get-ProjectSlug)-$([DateTimeOffset]::Now.ToUnixTimeSeconds())"
     $workdir = Get-ContainerWorkdir
+    # --init puts docker-init (tini) at PID 1, so processes orphaned inside the
+    # container are reaped. With the agent at PID 1 they stayed zombies, since
+    # neither Claude Code nor node reaps children it did not spawn.
     $dockerArgs = @(
-        'run', '-it', '--rm',
+        'run', '-it', '--rm', '--init',
         '--name', $name,
         '-v', "$(Get-HostWorkdir):$workdir",
         '-w', $workdir

@@ -2,7 +2,7 @@
 #
 #  THIS FILE IS GENERATED — do not edit it directly.
 #  Source: src/, assembled by tools/build.sh. Edit there and rebuild.
-#  Version 1.5.0
+#  Version 1.5.1
 #
 #
 # Claude Code sandbox installer.
@@ -13,7 +13,7 @@
 # image, and the named volumes that hold your login. Re-run it to upgrade.
 set -euo pipefail
 
-INSTALLER_VERSION="1.5.0"
+INSTALLER_VERSION="1.5.1"
 RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
 REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
@@ -1072,7 +1072,7 @@ cat <<'__SANDBOX_ASSET_EOF__'
 # Anything else a project needs gets installed into that project's own
 # directory (./.jdk, ./.bin, etc.) — resist adding it here.
 #
-# Managed by the agent-sandbox installer (v1.5.0). Re-running the
+# Managed by the agent-sandbox installer (v1.5.1). Re-running the
 # installer rewrites this file; local edits are backed up first, but the
 # supported way to customise is to keep your own copy elsewhere and build
 # with --src-dir.
@@ -1202,7 +1202,7 @@ cat <<'__SANDBOX_ASSET_EOF__'
 #!/usr/bin/env bash
 # claude-sandbox — run Claude Code sandboxed in the current directory.
 #
-# Installed by the agent-sandbox installer (v1.5.0):
+# Installed by the agent-sandbox installer (v1.5.1):
 #   curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.sh | bash
 # Edits here are backed up, not preserved, when you upgrade.
 #
@@ -1218,7 +1218,7 @@ IMAGE_BASENAME=claude-sandbox
 LAUNCHER_NAME=claude-sandbox
 
 # --- shared launcher machinery (generated; see https://github.com/mriffle/llm-cli-docker-sandbox) ----------------
-SANDBOX_VERSION="1.5.0"
+SANDBOX_VERSION="1.5.1"
 RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
 REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
@@ -1742,7 +1742,13 @@ run_container() {
     docker_sock_args
     # The ${a[@]+"${a[@]}"} form, not a bare "${a[@]}": expanding an *empty*
     # array under `set -u` is fatal on bash 3.2, which is still macOS /bin/bash.
-    exec docker run -it --rm \
+    #
+    # --init puts docker-init (tini) at PID 1. Without it the agent is PID 1,
+    # and every process orphaned inside the container (a backgrounded dev
+    # server, a shell that exits before its child) is reparented to it on
+    # exit. Neither Claude Code nor node reaps children it did not spawn, so
+    # each one stayed a zombie until the session ended.
+    exec docker run -it --rm --init \
         --name "$(container_name)" \
         -v "$src:$dst" \
         -w "$dst" \

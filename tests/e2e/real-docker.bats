@@ -89,6 +89,42 @@ assert_output_contains() { case "$output" in *"$1"*) return 0 ;; *) fail_with "e
     [ -O "$proj/proof.txt" ]
 }
 
+# Zombies left behind by a container whose PID 1 never reaps. `sleep` stands
+# in for the agent: like Claude Code and node it never waits on children it did
+# not spawn, and the entrypoint execs it into PID 1 exactly as it does the
+# agent. Each `docker exec` orphans a short sleep, which the kernel hands to
+# PID 1 when its subshell exits.
+zombies_left() {
+    local name="sandbox-e2e-init-$E2E_USER-$1" k n; shift
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    docker run -d --name "$name" "$@" --cap-drop=ALL \
+        --security-opt=no-new-privileges "$CLAUDE_IMAGE" sleep 60 >/dev/null || return 1
+    for k in 1 2 3; do docker exec "$name" sh -c '(sleep 0.2 &); exit 0'; done
+    sleep 2
+    n=$(docker exec "$name" sh -c 'grep -l "^State:[[:space:]]*Z" /proc/[0-9]*/status 2>/dev/null | wc -l')
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    printf '%s' "$n" | tr -d ' '
+}
+
+@test "e2e: --init reaps processes orphaned inside the container" {
+    local without with
+    # The control: with no init, the orphans stay zombies. If this ever stops
+    # holding, the assertion below proves nothing.
+    without=$(zombies_left noinit)
+    [ "$without" -ge 1 ] || fail_with "control: expected zombies without --init, got '$without'"
+    with=$(zombies_left init --init)
+    [ "$with" = 0 ] || fail_with "expected no zombies with --init, got '$with'"
+}
+
+@test "e2e: under --init the entrypoint still runs the agent" {
+    # docker-init at PID 1, the image's entrypoint and then claude beneath it.
+    run docker run --rm --init --cap-drop=ALL --security-opt=no-new-privileges \
+        "$CLAUDE_IMAGE" sh -c 'cat /proc/1/comm; claude --version'
+    assert_success
+    assert_output_contains "docker-init"
+    assert_output_contains "Claude Code"
+}
+
 @test "e2e: two projects mounted this way have two different cwds" {
     local a="$BATS_TEST_TMPDIR/alpha" b="$BATS_TEST_TMPDIR/beta" out_a out_b
     mkdir -p "$a" "$b"

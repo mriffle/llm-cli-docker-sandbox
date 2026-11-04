@@ -246,7 +246,7 @@ LOCAL_VOL="claude-local-$USER"
 docker volume create "$CONFIG_VOL" >/dev/null
 docker volume create "$LOCAL_VOL" >/dev/null
 
-exec docker run -it --rm \
+exec docker run -it --rm --init \
   --name "claude-$USER-$(basename "$PWD")-$(date +%s)" \
   -v "$PWD:$PWD" -w "$PWD" \
   -v "$CONFIG_VOL:/home/agent/.claude" \
@@ -263,6 +263,7 @@ Notes:
 
 - `docker volume create` is idempotent — it does real work exactly once per user, then no-ops. Named volumes are **not** deleted by `--rm`; they persist until `docker volume rm`.
 - The container name includes user, project, and timestamp so concurrent sessions (and concurrent users) don't collide.
+- **`--init` keeps orphaned processes from piling up as zombies.** It runs Docker's bundled `tini` as PID 1 instead of the agent. Whatever the agent backgrounds and abandons (a dev server, a watcher, a shell that exits before its child) is handed to PID 1 when its parent dies, and neither Claude Code nor node reaps processes it did not start itself, so without the flag each one stays a zombie until the session ends.
 - **The `GIT_CONFIG_*` block is what lets the agent commit.** With no git identity in the container, `git commit` fails with "Author identity unknown". `GIT_CONFIG_COUNT`/`KEY`/`VALUE` sets real config, so `git config --get user.email` reads back correctly for hooks and tooling — `GIT_AUTHOR_*` would set the commit but leave the config empty. Drop the block (or set `COUNT=0`) if you have no identity configured on the host; the installed launcher probes first and omits it.
 - **To let the agent push**, additionally pass a credential for the remote's host. Resolve it on the host, so you never mount a secret:
 
@@ -498,7 +499,7 @@ else
   echo "codex-sandbox: WARNING: npm version check failed; running existing image without update check" >&2
 fi
 
-exec docker run -it --rm \
+exec docker run -it --rm --init \
   --name "codex-$USER-$(basename "$PWD")-$(date +%s)" \
   -v "$PWD:$PWD" -w "$PWD" \
   -v "$CONFIG_VOL:/home/agent/.codex" \

@@ -523,7 +523,13 @@ run_container() {
     docker_sock_args
     # The ${a[@]+"${a[@]}"} form, not a bare "${a[@]}": expanding an *empty*
     # array under `set -u` is fatal on bash 3.2, which is still macOS /bin/bash.
-    exec docker run -it --rm \
+    #
+    # --init puts docker-init (tini) at PID 1. Without it the agent is PID 1,
+    # and every process orphaned inside the container (a backgrounded dev
+    # server, a shell that exits before its child) is reparented to it on
+    # exit. Neither Claude Code nor node reaps children it did not spawn, so
+    # each one stayed a zombie until the session ended.
+    exec docker run -it --rm --init \
         --name "$(container_name)" \
         -v "$src:$dst" \
         -w "$dst" \

@@ -69,6 +69,36 @@ refute_tmux_log() {
     argv_has "--security-opt=no-new-privileges"
 }
 
+# --- PID 1 -----------------------------------------------------------------
+# Without --init the agent is PID 1, and every process orphaned inside the
+# container is reparented to it. Neither Claude Code nor node reaps children
+# it did not spawn, so each became a zombie that lasted the whole session.
+
+@test "the claude session runs under docker's init, which reaps orphans" {
+    cd "$PROJECT"
+    run bash "$LAUNCH"
+    assert_success
+    assert_session_flag "--init" "claude-sandbox-testuser"
+}
+
+@test "the claude session keeps its init with the opt-ins and agent flags" {
+    local data="$TESTDIR/shared data"
+    mkdir -p "$data"
+    cd "$PROJECT"
+    run bash "$LAUNCH" --sandbox-docker --sandbox-ro "$data" --dangerously-skip-permissions
+    assert_success
+    assert_session_flag "--init" "claude-sandbox-testuser"
+}
+
+@test "the codex session runs under docker's init, which reaps orphans" {
+    bash "$(installer codex)" >/dev/null 2>&1
+    cd "$PROJECT"
+    : > "$FAKE_DOCKER_ARGV"
+    FAKE_CODEX_VERSION=1.2.3 run bash "$HOME/.local/bin/codex-sandbox"
+    assert_success
+    assert_session_flag "--init" "codex-sandbox-testuser"
+}
+
 # --- one mount point would be one project identity -------------------------
 # Both agents key their per-project state on the working directory string:
 # Claude Code's ~/.claude/projects/<cwd-slug>/ holds the session transcripts
