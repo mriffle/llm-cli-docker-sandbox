@@ -18,7 +18,8 @@ setup() {
     export SANDBOX_FAKE_UPSTREAM=fail
     export SANDBOX_FAKE_NPM=1.2.3
     export FAKE_DOCKER_ARGV="$TESTDIR/docker.argv"
-    : > "$FAKE_DOCKER_ARGV"
+    export FAKE_DOCKER_ENV="$TESTDIR/docker.env"
+    : > "$FAKE_DOCKER_ARGV"; : > "$FAKE_DOCKER_ENV"
     DF="$HOME/claude-sandbox/Dockerfile"
     LAUNCHER="$HOME/bin/claude-sandbox.ps1"
     SHIM="$HOME/bin/claude-sandbox.cmd"
@@ -521,8 +522,15 @@ ps_argv_lacks() {
     : > "$FAKE_DOCKER_ARGV"
     run "$PWSH" -NoProfile -File "$LAUNCHER" --sandbox-git
     assert_success
-    grep -qxF -- "SANDBOX_GIT_USER=ada" "$FAKE_DOCKER_ARGV"
-    grep -qxF -- "SANDBOX_GIT_TOKEN=s3cret" "$FAKE_DOCKER_ARGV"
+    container_env_has "SANDBOX_GIT_USER=ada"
+    container_env_has "SANDBOX_GIT_TOKEN=s3cret"
+    # Never on docker's command line, which other users can read with `ps`:
+    # the argv carries the bare names and docker reads the values from its
+    # environment.
+    ps_argv_lacks "s3cret"
+    ps_argv_lacks "SANDBOX_GIT_TOKEN="
+    grep -qxF -- "SANDBOX_GIT_TOKEN" "$FAKE_DOCKER_ARGV"
+    grep -qxF -- "SANDBOX_GIT_USER" "$FAKE_DOCKER_ARGV"
     grep -qxF -- "GIT_CONFIG_KEY_2=credential.https://github.com.helper" "$FAKE_DOCKER_ARGV"
     ps_argv_lacks "--sandbox-git"
 }

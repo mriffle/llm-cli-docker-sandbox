@@ -155,6 +155,14 @@ runs under `pwsh` on the Linux runner.
   reintroduce a constant mount path — and if a guard ever sends a project back
   to `/workspace`, it must say so out loud, because a silent fallback rebuilds
   the collision invisibly.
+- **A secret never goes on a command line.** `--sandbox-git` used to pass
+  `-e SANDBOX_GIT_TOKEN=<token>`, and the docker CLI that carries that argv
+  stays attached for the whole session. `/proc/PID/cmdline` is world-readable,
+  so on a shared machine any user could read the token with `ps`. The launchers
+  now export the variable and pass the bare `-e SANDBOX_GIT_TOKEN`, which docker
+  fills from its own environment (`/proc/PID/environ` is owner-only). The fake
+  `docker` resolves bare names into `$FAKE_DOCKER_ENV`, so tests assert "in
+  the container" and "not in argv" separately.
 - **The agent must not be PID 1.** The entrypoint ends in `exec "$@"`, so
   without `--init` the agent *is* PID 1, and every process orphaned inside the
   container is reparented to it. Neither Claude Code nor node reaps children

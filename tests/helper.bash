@@ -188,3 +188,17 @@ assert_session_flag() {
         || { printf -- '--- argv ---\n%s\n' "$(cat "$FAKE_DOCKER_ARGV")" >&2
              fail_with "expected every session docker run to pass $1 before $2"; }
 }
+
+# container_env_has NAME=value — the last docker invocation (the session's own
+# `docker run`, which the launcher execs last) hands the container exactly this
+# variable. Reads $FAKE_DOCKER_ENV, where the fake docker resolves a bare
+# `-e NAME` from its environment just as real docker does.
+container_env_has() {
+    awk -v want="$1" '
+        /^--- invocation ---$/ { n = 0; next }
+        { line[++n] = $0 }
+        END { for (i = 1; i <= n; i++) if (line[i] == want) exit 0; exit 1 }
+    ' "$FAKE_DOCKER_ENV" \
+        || { printf -- '--- container env ---\n%s\n' "$(cat "$FAKE_DOCKER_ENV")" >&2
+             fail_with "expected the container to receive: $1"; }
+}

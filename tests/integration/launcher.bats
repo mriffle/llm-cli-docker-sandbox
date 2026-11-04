@@ -14,10 +14,11 @@ setup() {
     export FAKE_TMUX_STATE="$TESTDIR/tmux"
     export FAKE_TMUX_LOG="$TESTDIR/tmux.log"
     export FAKE_DOCKER_ARGV="$TESTDIR/docker.argv"
+    export FAKE_DOCKER_ENV="$TESTDIR/docker.env"
     export FAKE_CURL_LOG="$TESTDIR/curl.log"
     export FAKE_INSTALLER_DIR="$REPO_ROOT/install"
     mkdir -p "$FAKE_TMUX_STATE"
-    : > "$FAKE_TMUX_LOG"; : > "$FAKE_DOCKER_ARGV"; : > "$FAKE_CURL_LOG"
+    : > "$FAKE_TMUX_LOG"; : > "$FAKE_DOCKER_ARGV"; : > "$FAKE_DOCKER_ENV"; : > "$FAKE_CURL_LOG"
     # A stand-in for the host's docker socket. --sandbox-docker refuses to
     # mount a path that is not there, and the host running the suite may have
     # no docker at all — GitHub's macOS runners do not — so the fake daemon is
@@ -517,13 +518,31 @@ argv_lacks() {
     export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
     run bash "$LAUNCH" --sandbox-git
     assert_success
-    argv_has "SANDBOX_GIT_USER=ada"
-    argv_has "SANDBOX_GIT_TOKEN=s3cret"
+    container_env_has "SANDBOX_GIT_USER=ada"
+    container_env_has "SANDBOX_GIT_TOKEN=s3cret"
     argv_has "GIT_CONFIG_KEY_2=credential.https://github.com.helper"
     argv_has "GIT_CONFIG_COUNT=3"
     # The helper must name the container's variables, not expand them here.
     grep -qF 'SANDBOX_GIT_TOKEN"' "$FAKE_DOCKER_ARGV" \
         || fail_with "the credential helper did not reach the container intact"
+}
+
+@test "--sandbox-git never puts the token on docker's command line" {
+    # The docker CLI stays attached for the whole session, and any user on the
+    # host can read its argv with `ps` (/proc/PID/cmdline is world-readable).
+    # So the token goes in docker's environment, readable only by its owner,
+    # and the argv carries the bare names, which docker resolves from there.
+    cd "$PROJECT"
+    export FAKE_GIT_ORIGIN=https://github.com/ada/looms.git
+    export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
+    run bash "$LAUNCH" --sandbox-git
+    assert_success
+    argv_lacks "s3cret"
+    argv_lacks "SANDBOX_GIT_TOKEN="
+    argv_lacks "SANDBOX_GIT_USER="
+    argv_has "SANDBOX_GIT_TOKEN"
+    argv_has "SANDBOX_GIT_USER"
+    container_env_has "SANDBOX_GIT_TOKEN=s3cret"
 }
 
 @test "--sandbox-git strips the flag rather than passing it to the agent" {
@@ -561,7 +580,8 @@ argv_lacks() {
     export GH_TOKEN=from-env
     run bash "$LAUNCH" --sandbox-git
     assert_success
-    argv_has "SANDBOX_GIT_TOKEN=from-env"
+    container_env_has "SANDBOX_GIT_TOKEN=from-env"
+    argv_lacks "from-env"
     argv_lacks "from-store"
 }
 
@@ -571,8 +591,9 @@ argv_lacks() {
     export FAKE_GH_TOKEN=from-gh
     run bash "$LAUNCH" --sandbox-git
     assert_success
-    argv_has "SANDBOX_GIT_TOKEN=from-gh"
-    argv_has "SANDBOX_GIT_USER=x-access-token"
+    container_env_has "SANDBOX_GIT_TOKEN=from-gh"
+    container_env_has "SANDBOX_GIT_USER=x-access-token"
+    argv_lacks "from-gh"
 }
 
 @test "a non-github https remote still gets its own scoped helper" {
@@ -600,6 +621,9 @@ argv_lacks() {
     run bash "$LAUNCH" --sandbox-git --sandbox-tmux
     assert_success
     tmux_log_has "SANDBOX_GIT=1"
+    # The session resolves the credential itself; the outer launcher never
+    # puts it on tmux's command line.
+    refute_tmux_log "s3cret"
 }
 
 @test "--sandbox-git is only honoured in first position" {
@@ -702,12 +726,12 @@ argv_lacks() {
     export FAKE_GIT_CRED_USER=ada FAKE_GIT_CRED_PASS=s3cret
     run bash "$LAUNCH" --sandbox-docker --sandbox-git
     assert_success
-    argv_has "SANDBOX_GIT_TOKEN=s3cret"
+    container_env_has "SANDBOX_GIT_TOKEN=s3cret"
     argv_has "$FAKE_SOCK:/var/run/docker.sock"
     : > "$FAKE_DOCKER_ARGV"
     run bash "$LAUNCH" --sandbox-git --sandbox-docker
     assert_success
-    argv_has "SANDBOX_GIT_TOKEN=s3cret"
+    container_env_has "SANDBOX_GIT_TOKEN=s3cret"
     argv_has "$FAKE_SOCK:/var/run/docker.sock"
 }
 
@@ -1051,12 +1075,12 @@ ro_setup() {
     assert_success
     argv_has "$DATA:$DATA:ro"
     argv_has "$FAKE_SOCK:/var/run/docker.sock"
-    argv_has "SANDBOX_GIT_TOKEN=s3cret"
+    container_env_has "SANDBOX_GIT_TOKEN=s3cret"
     : > "$FAKE_DOCKER_ARGV"
     run bash "$LAUNCH" --sandbox-git --sandbox-docker "--sandbox-ro=$DATA"
     assert_success
     argv_has "$DATA:$DATA:ro"
-    argv_has "SANDBOX_GIT_TOKEN=s3cret"
+    container_env_has "SANDBOX_GIT_TOKEN=s3cret"
 }
 
 @test "--sandbox-ro composes with --sandbox-tmux by re-emitting the resolved flag" {

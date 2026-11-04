@@ -217,7 +217,13 @@ function Get-GitEnvArgs {
         } else {
             $cred = Get-GitCredential $gitHost
             if ($cred.Count -eq 2) {
-                $envArgs += @('-e', "SANDBOX_GIT_USER=$($cred[0])", '-e', "SANDBOX_GIT_TOKEN=$($cred[1])")
+                # By name only: docker copies a bare `-e NAME` from the
+                # environment it inherits. `-e NAME=value` would put the token
+                # on docker's command line, which other users can read for as
+                # long as the session runs.
+                $env:SANDBOX_GIT_USER = $cred[0]
+                $env:SANDBOX_GIT_TOKEN = $cred[1]
+                $envArgs += @('-e', 'SANDBOX_GIT_USER', '-e', 'SANDBOX_GIT_TOKEN')
                 $envArgs += @('-e', "GIT_CONFIG_KEY_$n=credential.https://$gitHost.helper",
                               '-e', "GIT_CONFIG_VALUE_$n=$GitCredHelper")
                 $n++

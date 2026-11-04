@@ -2,7 +2,7 @@
 #
 #  THIS FILE IS GENERATED — do not edit it directly.
 #  Source: src/, assembled by tools/build.sh. Edit there and rebuild.
-#  Version 1.5.1
+#  Version 1.5.2
 #
 #
 #   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.ps1 | iex
@@ -26,7 +26,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-$script:InstallerVersion = '1.5.1'
+$script:InstallerVersion = '1.5.2'
 $script:RawBase          = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
 $script:RepoUrl          = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $script:Agent            = 'codex'
@@ -697,7 +697,7 @@ $AssetDockerfile = @'
 # NOTE: Codex has no auto-updater — version is baked at build time.
 # The launcher rebuilds when a new version ships.
 #
-# Managed by the agent-sandbox installer (v1.5.1). Re-running the
+# Managed by the agent-sandbox installer (v1.5.2). Re-running the
 # installer rewrites this file; local edits are backed up first.
 
 FROM node:24-slim
@@ -764,14 +764,14 @@ ENV PATH=/home/agent/.npm-global/bin:/home/agent/.cargo/bin:/usr/local/cargo/bin
 $AssetLauncher = @'
 # codex-sandbox.ps1 — run Codex CLI sandboxed in the current directory.
 #
-# Installed by the agent-sandbox installer (v1.5.1):
+# Installed by the agent-sandbox installer (v1.5.2):
 #   irm https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/codex.ps1 | iex
 # Edits here are backed up, not preserved, when you upgrade.
 #
 # Autonomy comes from ~/.codex/config.toml inside the container, not a flag.
 $ErrorActionPreference = 'Stop'
 
-$SandboxVersion = '1.5.1'
+$SandboxVersion = '1.5.2'
 $RawBase        = 'https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main'
 $RepoUrl        = 'https://github.com/mriffle/llm-cli-docker-sandbox'
 $Agent          = 'codex'
@@ -998,7 +998,13 @@ function Get-GitEnvArgs {
         } else {
             $cred = Get-GitCredential $gitHost
             if ($cred.Count -eq 2) {
-                $envArgs += @('-e', "SANDBOX_GIT_USER=$($cred[0])", '-e', "SANDBOX_GIT_TOKEN=$($cred[1])")
+                # By name only: docker copies a bare `-e NAME` from the
+                # environment it inherits. `-e NAME=value` would put the token
+                # on docker's command line, which other users can read for as
+                # long as the session runs.
+                $env:SANDBOX_GIT_USER = $cred[0]
+                $env:SANDBOX_GIT_TOKEN = $cred[1]
+                $envArgs += @('-e', 'SANDBOX_GIT_USER', '-e', 'SANDBOX_GIT_TOKEN')
                 $envArgs += @('-e', "GIT_CONFIG_KEY_$n=credential.https://$gitHost.helper",
                               '-e', "GIT_CONFIG_VALUE_$n=$GitCredHelper")
                 $n++
@@ -1436,7 +1442,7 @@ Invoke-LauncherMain @args
 $AssetShim = @'
 @echo off
 rem Shim so `codex-sandbox` works from cmd.exe and never trips execution policy.
-rem Installed by the agent-sandbox installer (v1.5.1).
+rem Installed by the agent-sandbox installer (v1.5.2).
 setlocal
 set "SANDBOX_PS1=%~dp0codex-sandbox.ps1"
 where pwsh >nul 2>nul
@@ -1450,7 +1456,7 @@ exit /b %ERRORLEVEL%
 $AssetConfigToml = @'
 # Codex autonomy inside the container. The container is the security
 # boundary, so Codex's own OS-level sandbox is turned off and approvals
-# are disabled. Seeded by the agent-sandbox installer (v1.5.1);
+# are disabled. Seeded by the agent-sandbox installer (v1.5.2);
 # your edits here are preserved across upgrades.
 approval_policy = "never"
 sandbox_mode = "danger-full-access"

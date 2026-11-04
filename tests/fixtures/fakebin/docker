@@ -32,6 +32,23 @@ if [ -n "${FAKE_DOCKER_ARGV:-}" ]; then
     printf -- '--- invocation ---\n' >> "$FAKE_DOCKER_ARGV"
     for _a in "$@"; do printf '%s\n' "$_a" >> "$FAKE_DOCKER_ARGV"; done
 fi
+# What the container's environment would hold, one NAME=value per line. A bare
+# `-e NAME` is resolved from this process's environment, as real docker does
+# (and dropped if unset), so a test can prove a secret reached the container
+# while proving separately, through $FAKE_DOCKER_ARGV, that it was never in argv.
+if [ -n "${FAKE_DOCKER_ENV:-}" ]; then
+    printf -- '--- invocation ---\n' >> "$FAKE_DOCKER_ENV"
+    _prev=''
+    for _a in "$@"; do
+        if [ "$_prev" = -e ] || [ "$_prev" = --env ]; then
+            case "$_a" in
+                *=*) printf '%s\n' "$_a" ;;
+                *) if _v=$(printenv "$_a"); then printf '%s=%s\n' "$_a" "$_v"; fi ;;
+            esac
+        fi
+        _prev=$_a
+    done >> "$FAKE_DOCKER_ENV"
+fi
 
 img_file()  { printf '%s/images/%s.labels' "$S" "$(printf '%s' "$1" | tr '/:' '__')"; }
 vol_owner() { printf '%s/volumes/%s.owner' "$S" "$1"; }

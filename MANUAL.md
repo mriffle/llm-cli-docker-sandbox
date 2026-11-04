@@ -272,13 +272,14 @@ Notes:
   eval "$(printf 'protocol=https\nhost=%s\n\n' "$host" \
       | GIT_TERMINAL_PROMPT=0 git credential fill \
       | sed -n 's/^username=/u=/p; s/^password=/p=/p')"
+  export SANDBOX_GIT_USER="$u" SANDBOX_GIT_TOKEN="$p"
   # ...then add to the docker run above (bumping GIT_CONFIG_COUNT to 3):
-  #   -e "SANDBOX_GIT_USER=$u" -e "SANDBOX_GIT_TOKEN=$p" \
+  #   -e SANDBOX_GIT_USER -e SANDBOX_GIT_TOKEN \
   #   -e "GIT_CONFIG_KEY_2=credential.https://$host.helper" \
   #   -e 'GIT_CONFIG_VALUE_2=!f(){ test "$1" = get && printf "username=%s\npassword=%s\n" "$SANDBOX_GIT_USER" "$SANDBOX_GIT_TOKEN"; }; f'
   ```
 
-  `GIT_TERMINAL_PROMPT=0` matters — without it a missing credential makes git prompt on the terminal instead of declining. The helper key is scoped to one host, so the credential is never offered to another; within that host, the token's own permissions apply. The installed launcher does all of this behind `--sandbox-git`.
+  `GIT_TERMINAL_PROMPT=0` matters — without it a missing credential makes git prompt on the terminal instead of declining. Pass the two variables by name, as shown, never as `-e "SANDBOX_GIT_TOKEN=$p"`: docker copies a bare `-e NAME` from its own environment, whereas a value on the command line sits in the attached docker process's argv for the whole session, where any user on the machine can read it with `ps`. The helper key is scoped to one host, so the credential is never offered to another; within that host, the token's own permissions apply. The installed launcher does all of this behind `--sandbox-git`.
 - **To let the agent use Docker**, mount the host's socket and join its group. Two arguments, and they are the ones to think hardest about before adding:
 
   ```bash

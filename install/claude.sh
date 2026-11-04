@@ -2,7 +2,7 @@
 #
 #  THIS FILE IS GENERATED — do not edit it directly.
 #  Source: src/, assembled by tools/build.sh. Edit there and rebuild.
-#  Version 1.5.1
+#  Version 1.5.2
 #
 #
 # Claude Code sandbox installer.
@@ -13,7 +13,7 @@
 # image, and the named volumes that hold your login. Re-run it to upgrade.
 set -euo pipefail
 
-INSTALLER_VERSION="1.5.1"
+INSTALLER_VERSION="1.5.2"
 RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
 REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
@@ -1072,7 +1072,7 @@ cat <<'__SANDBOX_ASSET_EOF__'
 # Anything else a project needs gets installed into that project's own
 # directory (./.jdk, ./.bin, etc.) — resist adding it here.
 #
-# Managed by the agent-sandbox installer (v1.5.1). Re-running the
+# Managed by the agent-sandbox installer (v1.5.2). Re-running the
 # installer rewrites this file; local edits are backed up first, but the
 # supported way to customise is to keep your own copy elsewhere and build
 # with --src-dir.
@@ -1202,7 +1202,7 @@ cat <<'__SANDBOX_ASSET_EOF__'
 #!/usr/bin/env bash
 # claude-sandbox — run Claude Code sandboxed in the current directory.
 #
-# Installed by the agent-sandbox installer (v1.5.1):
+# Installed by the agent-sandbox installer (v1.5.2):
 #   curl -fsSL https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main/install/claude.sh | bash
 # Edits here are backed up, not preserved, when you upgrade.
 #
@@ -1218,7 +1218,7 @@ IMAGE_BASENAME=claude-sandbox
 LAUNCHER_NAME=claude-sandbox
 
 # --- shared launcher machinery (generated; see https://github.com/mriffle/llm-cli-docker-sandbox) ----------------
-SANDBOX_VERSION="1.5.1"
+SANDBOX_VERSION="1.5.2"
 RAW_BASE="https://raw.githubusercontent.com/mriffle/llm-cli-docker-sandbox/main"
 REPO_URL="https://github.com/mriffle/llm-cli-docker-sandbox"
 
@@ -1463,8 +1463,13 @@ git_env_args() {
         if [ -z "$host" ]; then
             lwarn "--sandbox-git: no https remote here; nothing to forward"
         elif git_resolve_cred "$host"; then
-            GIT_ENV_ARGS+=(-e "SANDBOX_GIT_USER=$GIT_CRED_USER" \
-                           -e "SANDBOX_GIT_TOKEN=$GIT_CRED_TOKEN")
+            # By name only: docker copies a bare `-e NAME` from its own
+            # environment. `-e NAME=value` would put the token in the docker
+            # CLI's argv, which stays attached all session, and any user on
+            # the host can read argv with `ps` (/proc/PID/cmdline is 0444;
+            # /proc/PID/environ is readable only by its owner).
+            export SANDBOX_GIT_USER="$GIT_CRED_USER" SANDBOX_GIT_TOKEN="$GIT_CRED_TOKEN"
+            GIT_ENV_ARGS+=(-e SANDBOX_GIT_USER -e SANDBOX_GIT_TOKEN)
             git_env_add "credential.https://$host.helper" "$GIT_CRED_HELPER"
         else
             lwarn "--sandbox-git: no credential stored for $host; pushing will fail"

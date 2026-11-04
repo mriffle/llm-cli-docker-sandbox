@@ -346,13 +346,16 @@ zombies_left() {
 # The credential helper is a shell snippet that survives two levels of embedding
 # (build.sh splices it into a quoted heredoc inside the installer). This proves
 # it arrives intact and that a real git will call it — and that it is scoped to
-# one host, so another host gets nothing.
+# one host, so another host gets nothing. The credential travels as the
+# launcher sends it: bare `-e NAME`s that real docker fills from its own
+# environment, so the token is never in an argv another user could read.
 @test "e2e: the forwarded credential helper works and is scoped to one host" {
     local helper
     helper='!f(){ test "$1" = get && printf "username=%s\npassword=%s\n" "$SANDBOX_GIT_USER" "$SANDBOX_GIT_TOKEN"; }; f'
 
+    SANDBOX_GIT_USER=ada SANDBOX_GIT_TOKEN=s3cret \
     run docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
-        -e SANDBOX_GIT_USER=ada -e SANDBOX_GIT_TOKEN=s3cret \
+        -e SANDBOX_GIT_USER -e SANDBOX_GIT_TOKEN \
         -e GIT_CONFIG_COUNT=1 \
         -e "GIT_CONFIG_KEY_0=credential.https://github.com.helper" \
         -e "GIT_CONFIG_VALUE_0=$helper" \
@@ -361,8 +364,9 @@ zombies_left() {
     assert_output_contains "username=ada"
     assert_output_contains "password=s3cret"
 
+    SANDBOX_GIT_USER=ada SANDBOX_GIT_TOKEN=s3cret \
     run docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
-        -e SANDBOX_GIT_USER=ada -e SANDBOX_GIT_TOKEN=s3cret \
+        -e SANDBOX_GIT_USER -e SANDBOX_GIT_TOKEN \
         -e GIT_TERMINAL_PROMPT=0 \
         -e GIT_CONFIG_COUNT=1 \
         -e "GIT_CONFIG_KEY_0=credential.https://github.com.helper" \

@@ -244,8 +244,13 @@ git_env_args() {
         if [ -z "$host" ]; then
             lwarn "--sandbox-git: no https remote here; nothing to forward"
         elif git_resolve_cred "$host"; then
-            GIT_ENV_ARGS+=(-e "SANDBOX_GIT_USER=$GIT_CRED_USER" \
-                           -e "SANDBOX_GIT_TOKEN=$GIT_CRED_TOKEN")
+            # By name only: docker copies a bare `-e NAME` from its own
+            # environment. `-e NAME=value` would put the token in the docker
+            # CLI's argv, which stays attached all session, and any user on
+            # the host can read argv with `ps` (/proc/PID/cmdline is 0444;
+            # /proc/PID/environ is readable only by its owner).
+            export SANDBOX_GIT_USER="$GIT_CRED_USER" SANDBOX_GIT_TOKEN="$GIT_CRED_TOKEN"
+            GIT_ENV_ARGS+=(-e SANDBOX_GIT_USER -e SANDBOX_GIT_TOKEN)
             git_env_add "credential.https://$host.helper" "$GIT_CRED_HELPER"
         else
             lwarn "--sandbox-git: no credential stored for $host; pushing will fail"
