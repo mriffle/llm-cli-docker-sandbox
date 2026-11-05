@@ -59,6 +59,11 @@ All of this was done by hand on Apptainer 1.4.5 in non-setuid mode, with
 | `apptainer build --fakeroot` from a `.def` (Codex: apt + `npm install -g`) | 3 min 12 s, no root, no Docker; 454 MB SIF. |
 | Claude Code under `--containall` with config bound | First-run TUI renders; `.claude.json`, sessions and cache persist to the bind. |
 | Apptainer nested inside a launcher-made `unshare --user --net` | Works. Not needed, since `--network=none` does the same. |
+| Host filesystem visibility under the §5.6 flags | Only the image, the binds, `/proc`, `/sys` and a minimal `/dev` are in the mount namespace. `/home`, `/root`, `/mnt`, `/etc/passwd` are the image's. `/proc/1/root` is the container root. No block devices in `/dev`. |
+| Nested user namespace from inside (`unshare -Urm`), **no seccomp** | **Works:** uid 0 with full capabilities in the nested namespace, and a tmpfs mount succeeds. This is the kernel-surface gap §6 describes. `mount -t proc` is refused. |
+| `--security seccomp:FILE`, non-setuid | **Works unprivileged** (`Seccomp: 2` in the container). A missing or malformed profile is `FATAL`, exit 255; it is never silently skipped. |
+| Docker's default profile under Apptainer | Loads once reshaped (Appendix B). node, python, git, cargo, gcc and `child_process` all run. `unshare`, `mount`, `setns`, `pivot_root`, `keyctl`, `add_key`, `bpf`, `userfaultfd`, `init_module` and `clone(CLONE_NEWUSER)` all return EPERM. |
+| Per-rule `errnoRet` in a seccomp profile | **Ignored**, on 1.4.5 and on `main`: `LoadSeccompConfig` forces one errno onto every `SCMP_ACT_ERRNO` rule, and refuses a rule whose action type equals the default. So Docker's "`clone3` returns ENOSYS" trick is impossible: `clone3` must be allowed outright, and **`clone3(CLONE_NEWUSER)` still succeeds** under the profile. The filter also applies to Apptainer's own Go stage, which crashed when `clone3` returned EPERM. |
 
 ## 4. Architecture
 
@@ -68,8 +73,9 @@ host (user's own UID, no root)
 │   ├─ session dir (0700, local disk): sock/ work/ home/ life.fifo
 │   ├─ [A] egress proxy   apptainer exec --containall --no-eval --no-privs
 │   │                     --no-mount bind-paths  (HOST network)
-│   │                     node /opt/agent-sandbox/egress-proxy.js /egress/e.sock
-│   │                     └─ exits when life.fifo hits EOF (launcher gone)
+│   │                     --bind sock:/egress --bind life.fifo:/egress-life
+│   │                     node /opt/agent-sandbox/egress-proxy.js /egress/e.sock /egress-life
+│   │                     └─ exits when the fifo hits EOF (launcher gone)
 │   └─ [B] sandbox        apptainer run --containall --no-eval --no-privs
 │                         --no-mount bind-paths --net --network=none
 │                         --workdir work --home home:/home/agent
@@ -94,6 +100,13 @@ Docker stays exactly as it is today, apart from the image-layout prep in M0.
 - **Keep the Docker image's populated `/home/agent/.local`.** Docker fills a *new*
   volume from the image, and `tests/e2e/real-docker.bats` (~:147, "no download")
   depends on that. Allowlist that step in the parity test.
+- *Open question:* the entrypoint seeds an empty `claude-local` by running
+  `claude install`, which downloads. If the seed under `/opt` held the full
+  `~/.local` tree and the entrypoint **copied** it when the volume is empty,
+  the first Apptainer launch would not depend on the relay being up, and the
+  "no download" guarantee would hold for both runtimes. Check first whether
+  `claude install` writes anything a copy would miss (it records
+  `installMethod: native` in `.claude.json`, which lives in the config volume).
 - Set `ENV NPM_CONFIG_PREFIX=/home/agent/.npm-global` in both images. Today
   `npm config set prefix` writes `~/.npmrc`, which `--home` hides.
 - **Reshape the Dockerfiles so every `RUN` runs as root** with absolute paths and
@@ -126,6 +139,12 @@ Docker stays exactly as it is today, apart from the image-layout prep in M0.
 - **Parity test** (`tests/unit/images.bats`): every `RUN` body in a Dockerfile must
   appear verbatim in the matching `.def`'s `%post`, and every `ENV` must appear in
   `%environment`, except an explicit allowlist with a comment per entry.
+- *Open question for the owner:* instead of hand-maintaining the `.def` and
+  testing parity, `tools/build.sh` could **generate** it from the Dockerfile
+  with a small translator (`FROM`, `RUN`, `ENV`, skip an allowlist, append the
+  Apptainer-only sections from a stub). Drift becomes impossible rather than
+  detected. D2 stays intact: the SIF is still built locally from a `.def`
+  next to the Dockerfile; only who writes the `.def` changes.
 - **Freshness:** a `key=value` sidecar next to the SIF (`claude.sif.labels`)
   records `def_sha`, `installer_version` and, for Codex, `codex_version`. Read it
   in pure bash. Don't parse `apptainer inspect`, and don't depend on
@@ -283,10 +302,19 @@ existing tests.
 
 The launcher cannot `exec`, because it must own the proxy's lifetime.
 
-1. **Sweep** stale session dirs whose owner PID is dead.
+1. **Sweep** stale session dirs. **Not by PID liveness**: PIDs are reused, and
+   on a busy cluster a sweep keyed on a dead PID can delete a live session's
+   work dir. Each launcher holds an advisory lock (`flock`) on a file in its
+   session dir for its whole life; the sweep removes only dirs whose lock it
+   can take. This path is Linux-only, so `flock` is available.
 2. **Create the session dir**, mode 0700:
-   - `sock/` lives in `$XDG_RUNTIME_DIR` if set, else `mktemp -d` under `/tmp`.
-   - `work/` and `home/` live on local disk.
+   - `sock/` must be on a filesystem that supports unix sockets. **Probe, don't
+     assume:** try `$XDG_RUNTIME_DIR`, then `/tmp`, then the state dir, and
+     move on when binding a test socket fails. On some clusters both
+     `XDG_RUNTIME_DIR` and `/tmp` are NFS, where unix sockets do not work.
+   - `work/` and `home/` live on local disk. Say where: local `/tmp` by
+     default, `SANDBOX_SESSION_DIR` to override. Home filesystems on clusters
+     are often NFS, and `home/` takes cargo and npm caches.
    - `life.fifo` is the lifeline.
 3. **Scrub the environment** for both `apptainer` invocations with `env -i` and an
    allowlist (`PATH`, `TERM`, `HOME`, `USER`, `LANG`, `XDG_RUNTIME_DIR`, plus the
@@ -297,8 +325,14 @@ The launcher cannot `exec`, because it must own the proxy's lifetime.
    sits on the host network) never holds the token:
    - stdio goes to `session/proxy.log`
    - fd 3 is closed, or bats hangs
-   - it reads `life.fifo`, and the launcher holds the fifo open on fd 9 via
-     `exec 9>`
+   - it reads `life.fifo`, and the launcher holds the fifo open on fd 9.
+     **Open it read-write (`exec 9<>`), before starting the proxy.** A
+     write-only open blocks until a reader exists, and the proxy's read-only
+     open blocks until a writer exists, so `exec 9>` deadlocks whichever side
+     goes first. The read-write open never blocks, and the proxy still gets
+     EOF when the launcher dies, because the launcher was the only writer.
+   - the fifo is bound into the proxy's container (`--bind life.fifo:/egress-life`);
+     the proxy opens it by path
    - wait for its `ready` marker, with a timeout
 5. **Export the variables:**
    - every value as `APPTAINERENV_NAME`; **never `--env`**, which splits on
@@ -308,6 +342,10 @@ The launcher cannot `exec`, because it must own the proxy's lifetime.
      `http_proxy` = `http://127.0.0.1:3128`, `NO_PROXY=localhost,127.0.0.1,::1`,
      and `NODE_USE_ENV_PROXY=1`, because Node 24's `fetch` ignores the proxy
      variables without it
+   - `SANDBOX_NETWORK=proxy`, so the agent can see the network shape. Without
+     it the model flails at `ping`, `nslookup` and ssh clones before working
+     out that only HTTP(S) through the proxy works. The README's "for the
+     agent" notes should say the same
 6. **Build the bind list:**
    - project `src:dst`, the state dirs onto `/home/agent/.claude` and
      `.local` (or `.codex`), `sock/` at `/egress` **read-only**, and the
@@ -321,7 +359,14 @@ The launcher cannot `exec`, because it must own the proxy's lifetime.
    - Refuse a SIF, state dir or session dir that sits inside the project or any
      rw path.
 7. **Run in the foreground:**
-   `apptainer run --containall --no-eval --no-privs --no-mount bind-paths --net --network=none --workdir work --home home:/home/agent <binds> --pwd dst SIF <agent> "$@"`
+   `apptainer run --containall --no-eval --no-privs --no-mount bind-paths --net --network=none --security seccomp:/opt/agent-sandbox/seccomp.json --workdir work --home home:/home/agent <binds> --pwd dst SIF <agent> "$@"`
+   - `--security seccomp:` applies Docker's default profile, reshaped for
+     Apptainer (Appendix B). It ships in the image at
+     `/opt/agent-sandbox/seccomp.json`, so it is part of the §5.7 contract.
+     Measured: it loads unprivileged, a bad profile is fatal rather than
+     skipped, and the whole toolchain runs under it. It is never optional:
+     if Apptainer was built without seccomp support, refuse the launch with
+     an explanation, as with `--network=none`.
    - `--no-eval` stops Apptainer shell-evaluating environment values. Without
      it, the credential helper's literal `$SANDBOX_GIT_TOKEN` text is expanded
      away, and a token containing `$` or a backtick is mangled or executed.
@@ -345,6 +390,20 @@ The launcher cannot `exec`, because it must own the proxy's lifetime.
 - the environment variables set in §5.6 step 5
 
 **Proxy** (`/opt/agent-sandbox/egress-proxy.js`, in the SIF):
+- **It is a trust boundary.** It runs on the host network as the user's UID,
+  and the sandboxed agent feeds it bytes. A parser bug hands the agent exactly
+  what Docker's bridge denies: host loopback and abstract sockets. So: keep it
+  small, no dependencies beyond node's standard library, and cover the parser
+  with the table test in §9 before anything else in M1.
+- **Parser requirements** (the prototype in Appendix A gets most of these wrong):
+  - buffer until `\r\n\r\n`; the request line need not arrive in one chunk
+  - cap the header block (8 KiB) and close on overflow
+  - forward any bytes after the header block to the upstream once connected,
+    rather than dropping them
+  - accept `[::1]:443`-style bracketed IPv6 targets, and parse the port as
+    1–65535
+  - ignore the request headers (no `Host` cross-check is needed for CONNECT),
+    but never echo them back
 - It listens on the unix socket, mode 0600, inside a 0700 directory. Other local
   users cannot connect.
 - It handles `CONNECT host:port`. Decide whether to also support absolute-form
@@ -361,6 +420,12 @@ The launcher cannot `exec`, because it must own the proxy's lifetime.
      - decimal, octal and hex IPv4 forms (normalise before checking)
   4. **Allow RFC1918 and ULA**, as Docker's bridge does. Cluster git servers and
      package mirrors live there. A deny-private mode can be an env knob later.
+  5. *Optional, tighter than Docker at no cost:* also refuse every address
+     that belongs to one of the host's own interfaces (`os.networkInterfaces()`
+     at startup). Docker's bridge lets the container reach host services
+     bound on the LAN address; the proxy can close that in a few lines.
+     Default to Docker parity, and expose it as a knob, unless the owner
+     prefers the tighter default.
 - Log refusals to `proxy.log`.
 - Exit on EOF of the lifeline fifo.
 
@@ -411,15 +476,29 @@ Doctor must not return early when Docker is absent.
 | Persistent state privacy | root-only volumes | 0700 dirs, checked |
 | Secrets off the command line | bare `-e NAME` | `APPTAINERENV_*`, exported after the proxy starts |
 | Root filesystem | writable, ephemeral | read-only SIF (stricter); writable `/tmp` and home are per session |
+| Syscall filter | default seccomp profile | the same profile via `--security seccomp:` (Appendix B), minus the `clone3` rule |
+| Privilege ceiling on escape | daemon is root: a daemon or kernel escape can be root | no root anywhere: an escape is the user's own UID and nothing more |
 
 **Residual differences.** Document all of these in the README security notes:
-- **No seccomp profile.** Docker's default profile blocks `unshare`, `bpf`,
-  `keyctl`, `mount` and similar. Under Apptainer, `unshare -Urm` probably works
-  inside. That is not an escape, since inherited mounts stay locked and the
-  network stays isolated, but the kernel attack surface is larger.
+- **`clone3` is open.** Docker's profile makes `clone3` return ENOSYS so glibc
+  falls back to `clone`, where the namespace flags are filtered. Apptainer
+  ignores per-rule errno values (§3), so `clone3` must be allowed and a
+  process that calls it directly with `CLONE_NEWUSER` gets a nested user
+  namespace with full capabilities inside it. `unshare`, `clone` with
+  namespace flags, `mount`, `setns`, `keyctl`, `bpf` and the rest are blocked
+  as under Docker. The nested namespace is not an escape: inherited mounts
+  stay locked, the network stays isolated, and the real UID is unchanged.
+  It does widen the kernel attack surface relative to Docker, because the
+  historical user-namespace privilege-escalation bugs become reachable to
+  code that bypasses glibc. Worth an upstream issue asking Apptainer to
+  honour `errnoRet`; the fix is a few lines in `LoadSeccompConfig`.
 - The host's hostname (UTS) and `/sys` are shared.
 - Site `always use nv` binds GPU devices.
 - **Proxy-only egress:** git over ssh, raw TCP and DNS lookups don't work.
+- **Read-only rootfs:** `rustup target add`, `rustup update` and anything else
+  that writes under `/usr/local` fails with EROFS. Under Docker those work for
+  the session. The fix is a project-local toolchain, as with everything else
+  the image doesn't ship.
 - State is separate per runtime: two logins and two memory stores.
 - SQLite on NFS homes (Codex's state DB) is unreliable.
 
@@ -428,6 +507,18 @@ Doctor must not return early when Docker is absent.
 Each milestone leaves the tree green. **Release only after M0, and after M2.**
 M1 by itself would ship a SIF that nothing can run.
 
+**Size:** this roughly doubles the launcher, adds a third runtime fake, a new
+e2e tier and a CI job, and touches the installer preflight that every existing
+test exercises. It is the largest change the project has taken on. Expect M2
+to be the longest milestone by a wide margin.
+
+- **Spike: verify §8 items 1–5 before M0.** M0 ships a release that rebuilds
+  every user's Docker image on the strength of a layout the Apptainer path
+  needs, and items 1, 4 and 5 can change that layout. Item 5 is make-or-break:
+  if Claude Code or Codex does not talk through the CONNECT proxy, D3 fails
+  and nothing else matters. Run the spike with the Appendix A prototype and
+  record the results in §3. The owner's WSL2 box (Apptainer 1.4.5, a subuid
+  entry, Docker alongside) can run all of it. About half a day.
 - **M0: prepare (Docker only, released as a minor version).**
   - §5.1: `/opt` layout, root-only `RUN`s, `NPM_CONFIG_PREFIX`, reserved paths,
     MANUAL sync.
@@ -469,14 +560,24 @@ measured. Check it on a real Apptainer and record the result in this file.
 4. Inside `%post` under fakeroot: is `/tmp` the 64 MiB tmpfs (the 200 MB Claude
    download)? Does the native installer work with `HOME` overridden? Does
    `apt-get` work with and without a subuid entry?
-5. Do `claude install`, Claude Code, Codex (Rust), npm, pip, cargo and git all
-   honour the proxy variables? Is `NODE_USE_ENV_PROXY` needed in practice?
+5. **Make-or-break.** Do `claude install`, Claude Code, Codex (Rust), npm, pip,
+   cargo and git all honour the proxy variables? Is `NODE_USE_ENV_PROXY` needed
+   in practice? Claude Code's docs list `HTTPS_PROXY` support and say SOCKS is
+   unsupported, which fits D3, but the "TUI renders" row in §3 was almost certainly
+   measured on the host network, not through the proxy. Measure a real API call and a
+   `claude install` through the prototype proxy.
 6. What is the minimum Apptainer version? Check `--no-mount`, `--no-eval`,
    unprivileged `--network=none` and `--no-privs` on the oldest version you claim.
    How do setuid installs and SingularityCE differ?
 7. Can the GitHub `ubuntu-latest` runner do unprivileged Apptainer? (AppArmor
    userns sysctl or the PPA's profile, plus a subuid entry for `runner`.)
 8. Is `/dev/shm` usable under `--contain`? (Browsers, Playwright.)
+9. Does the **native** Claude Code binary (Bun-compiled) run under the
+   Appendix B profile? Only the npm-era `claude` was on this machine. Low
+   risk, since every Docker user already runs it under the stricter profile,
+   but measure it once the M0 image exists. Also confirm that the oldest
+   claimed Apptainer version was built with seccomp support, and what
+   `--security seccomp:` does on one that was not.
 
 ## 9. Testing
 
@@ -525,6 +626,11 @@ measured. Check it on a real Apptainer and record the result in this file.
   - Pin `SANDBOX_FAKE_UNAME_S=Linux`; Darwin must refuse.
 - **Unit:** the proxy's destination-policy table (via `node` in CI, or a
   bash-tested pure function), runtime resolution, and the parity test.
+  The proxy table must cover the parser as well as the policy: a request
+  line split across reads, pipelined bytes after the headers (must reach the
+  upstream), an oversized header block, bracketed IPv6, decimal/octal/hex
+  IPv4, a name resolving to a public and a loopback address (refused), a
+  literal `0.0.0.0`, and a port of 0 or 65536.
 - **docs.bats:**
   - README `--sandbox-runtime` needs a literal `--sandbox-runtime)` case arm.
   - Add `--runtime` to the installer flag list (~:58).
@@ -536,6 +642,9 @@ measured. Check it on a real Apptainer and record the result in this file.
     0 abstract sockets, proxy refusals, the API and `git ls-remote` via the
     proxy, bind ownership, read-only mounts return EROFS, ro/rw nesting, the
     credential helper intact, `/tmp` capacity, state persistence.
+  - Seccomp: `Seccomp: 2` in `/proc/self/status`, `unshare -Ur` and `mount`
+    refused with EPERM, and node, python, git, cargo and gcc still run. A
+    launch with a missing profile must fail, not run unfiltered.
   - Run the real launcher end to end (e.g. `claude-sandbox --sandbox-runtime=apptainer --version`).
     Apptainer needs no `-it`, so this is possible.
 - **CI:** a new `apptainer` job on `ubuntu-latest`, installing from
@@ -559,6 +668,15 @@ measured. Check it on a real Apptainer and record the result in this file.
   backgrounded proxy shares the terminal's process group (Ctrl-C reaches it),
   and a SIGKILL'd launcher orphans it. Hence the lifeline fifo.
 - bats hangs while a background child holds fd 3.
+- A fifo opened write-only blocks until a reader opens it, and vice versa; the
+  lifeline must be opened read-write by the launcher (§5.6 step 4).
+- "Owner PID is dead" is not "session is stale": PIDs are reused. Use a lock.
+- Docker's seccomp profile cannot be used as-is: it carries Docker-only
+  `includes`/`excludes`/`archMap` fields, its `errnoRet` values are ignored,
+  and a rule whose action type equals the default is refused. Resolve it
+  (Appendix B) and commit the result; never feed Apptainer the raw file.
+- The seccomp filter applies to Apptainer's own Go stage two as well as the
+  agent. Deny `clone3` and the starter dies before `exec`.
 
 ## 11. Done when
 
@@ -615,7 +733,56 @@ Sandbox invocation used in the test:
 `apptainer exec --containall --no-mount bind-paths --net --network=none --bind $SOCKDIR:/egress --bind relay.js:/opt/relay.js:ro --bind $PROJ --pwd $PROJ --env HTTPS_PROXY=http://127.0.0.1:3128 --env HTTP_PROXY=http://127.0.0.1:3128 claude.sif sh -c 'node /opt/relay.js /egress/e.sock & ...'`
 (Ship `APPTAINERENV_*` instead of `--env`, plus `--no-eval` and `--no-privs`; see §5.6.)
 
-## Appendix B: references
+## Appendix B: the seccomp profile (measured on Apptainer 1.4.5)
+
+Apptainer reads an OCI runtime-spec `LinuxSeccomp` document. Docker's default
+profile (`moby/profiles`, `seccomp/default.json`) needs four changes before it
+loads, and the result should be committed as `src/assets/seccomp.json` rather
+than generated at install time:
+
+1. Drop every entry with `includes.caps`: the sandbox holds no capabilities,
+   so Docker would not apply them either. Keep entries with `excludes.caps`
+   for the same reason; they include the `clone` rule that masks the
+   namespace flags.
+2. Keep `includes.arches` / `excludes.arches` entries only for the target
+   architecture, and turn the matching `archMap` entry into `architectures`.
+   Commit one profile per architecture, or one that lists both amd64 and
+   arm64 entries if a cross-check shows the unions are harmless.
+3. Drop every `SCMP_ACT_ERRNO` rule: Apptainer ignores `errnoRet`, and it
+   refuses a rule whose action type equals the default action.
+4. Add `clone3` to an allow entry. With no ENOSYS available, denying it
+   breaks every glibc 2.34+ `pthread_create`, including Apptainer's own.
+
+Keep only `names`, `action` and `args` on each entry. The resolver used for
+the measurement, kept here so the committed file can be regenerated when
+Docker's profile changes:
+
+```python
+import json, sys
+src, dst, arch = sys.argv[1:4]            # arch: amd64 | arm64
+p = json.load(open(src))
+scmp = {"amd64": "SCMP_ARCH_X86_64", "arm64": "SCMP_ARCH_AARCH64"}[arch]
+out = {"defaultAction": "SCMP_ACT_ERRNO", "architectures": [], "syscalls": []}
+for m in p["archMap"]:
+    if m["architecture"] == scmp:
+        out["architectures"] = [scmp] + m.get("subArchitectures", [])
+for e in p["syscalls"]:
+    inc, exc = e.get("includes", {}), e.get("excludes", {})
+    if inc.get("caps"): continue
+    if inc.get("arches") and arch not in inc["arches"]: continue
+    if exc.get("arches") and arch in exc["arches"]: continue
+    if e["action"] == "SCMP_ACT_ERRNO": continue
+    out["syscalls"].append({k: v for k, v in e.items() if k in ("names", "action", "args")})
+out["syscalls"].append({"names": ["clone3"], "action": "SCMP_ACT_ALLOW"})
+json.dump(out, open(dst, "w"), indent=1)
+```
+
+Measured result under that profile: node 24, python 3, git, cargo, gcc and
+`child_process` work; `unshare`, `mount`, `setns`, `pivot_root`, `keyctl`,
+`add_key`, `bpf`, `userfaultfd`, `init_module` and `clone(CLONE_NEWUSER)`
+return EPERM; `clone3(CLONE_NEWUSER)` succeeds (§6).
+
+## Appendix C: references
 
 - Apptainer networking (unprivileged users get only `none`): https://apptainer.org/docs/user/1.4/networking.html
 - Apptainer fakeroot modes: https://apptainer.org/docs/user/1.4/fakeroot.html
